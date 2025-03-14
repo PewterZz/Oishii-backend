@@ -1,37 +1,58 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .core.config import get_settings
-from .core.middleware import log_request_middleware
-from .api.v1.api import router as api_v1_router
+from contextlib import asynccontextmanager
+from .api.v1.api import router as api_router
+from .core.supabase import supabase
+import os
+from dotenv import load_dotenv
 
-settings = get_settings()
+# Load environment variables
+load_dotenv()
+
+# Application settings
+APP_NAME = os.getenv("APP_NAME", "Oishii API")
+DEBUG = os.getenv("DEBUG", "False").lower() == "true"
+ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Connect to Supabase
+    print(f"Starting up: Connected to Supabase in {ENVIRONMENT} environment")
+    yield
+    # Shutdown: Clean up resources
+    print("Shutting down")
 
 app = FastAPI(
-    title=settings.app_name,
-    debug=settings.debug,
-    docs_url="/docs",
-    redoc_url="/redoc",
+    title=APP_NAME,
+    description="API for the Oishii food swapping app",
+    version="1.0.0",
+    debug=DEBUG,
+    lifespan=lifespan
 )
 
-# Add CORS middleware
+# Configure CORS
+origins = ["*"]  # In production, replace with specific origins
+if ENVIRONMENT == "production":
+    origins = [
+        "https://oishii.app",
+        "https://www.oishii.app",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Add logging middleware
-app.middleware("http")(log_request_middleware)
-
 # Include API router
-app.include_router(api_v1_router, prefix=settings.api_v1_prefix)
+app.include_router(api_router)
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to FastAPI"}
+    return {"message": f"Welcome to the {APP_NAME}", "environment": ENVIRONMENT}
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy"}
+    return {"status": "healthy", "environment": ENVIRONMENT}

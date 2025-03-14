@@ -1,15 +1,85 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, HttpUrl, UUID4
+from typing import Optional, List
+from datetime import datetime
+from enum import Enum
+
+class CookType(str, Enum):
+    MEAL_PREPPER = "the meal prepper"
+    DAILY_FRESH = "the daily fresh cook"
+    ONE_BIG_BATCH = "the one-big-batch cook"
+    NON_COOK = "the non-cook"
+
+class CookFrequency(str, Enum):
+    ONE_TO_TWO = "1-2 times"
+    THREE_TO_FOUR = "3-4 times"
+    FIVE_TO_SEVEN = "5-7 times"
+    MORE_THAN_SEVEN = "more than 7 times"
+
+class DietaryRequirement(str, Enum):
+    VEGETARIAN = "vegetarian"
+    VEGAN = "vegan"
+    HALAL = "halal"
+    NONE = "none"
+
+class Purpose(str, Enum):
+    SAVE_EXPENSES = "save on food expenses"
+    EAT_HEALTHIER = "eat healthier meals"
+    TRY_NEW_DISHES = "try out new dishes"
+    MAKE_FRIENDS = "make new friends"
 
 class UserBase(BaseModel):
     email: EmailStr
-    username: str = Field(..., min_length=3, max_length=50)
+    first_name: str = Field(..., min_length=1, max_length=50)
+    last_name: str = Field(..., min_length=1, max_length=50)
+    bio: str = Field(..., min_length=10, max_length=500)
+    cook_type: CookType
+    cook_frequency: CookFrequency
+    dietary_requirements: List[DietaryRequirement] = []
+    allergies: str = Field(..., max_length=200)
+    purpose: Purpose
+    home_address: str = Field(..., min_length=5, max_length=200)
+    is_verified: bool = False
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8)
 
 class UserUpdate(BaseModel):
-    email: EmailStr | None = None
-    username: str | None = Field(None, min_length=3, max_length=50)
+    first_name: Optional[str] = Field(None, min_length=1, max_length=50)
+    last_name: Optional[str] = Field(None, min_length=1, max_length=50)
+    bio: Optional[str] = Field(None, min_length=10, max_length=500)
+    cook_type: Optional[CookType] = None
+    cook_frequency: Optional[CookFrequency] = None
+    dietary_requirements: Optional[List[DietaryRequirement]] = None
+    allergies: Optional[str] = Field(None, max_length=200)
+    purpose: Optional[Purpose] = None
+    home_address: Optional[str] = Field(None, min_length=5, max_length=200)
+    profile_picture: Optional[HttpUrl] = None
 
-class UserResponse(UserBase):
-    id: int 
+class UserResponse(BaseModel):
+    id: UUID4
+    email: EmailStr
+    first_name: str
+    last_name: str
+    bio: str
+    cook_type: CookType
+    cook_frequency: CookFrequency
+    dietary_requirements: List[DietaryRequirement]
+    allergies: str
+    purpose: Purpose
+    home_address: str
+    profile_picture: Optional[HttpUrl] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    swap_rating: Optional[float] = None
+    is_verified: bool
+
+class VerificationRequest(BaseModel):
+    email: EmailStr
+    code: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+class TokenData(BaseModel):
+    user_id: Optional[str] = None 
