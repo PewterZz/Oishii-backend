@@ -602,25 +602,31 @@ async def get_dev_token(
 async def get_current_user_profile(current_user: dict = Depends(get_current_user)):
     """Get the current user's profile."""
     #log the headers request
-    print(f"Headers request: {request.headers}")
+    print(f"headers: {respon.headers}")
     print(f"Current user: {current_user}")
     
     return current_user
 
 @router.patch("/me", response_model=UserResponse)
 async def update_current_user_profile(
+    request: Request,  # Remove Depends()
     user_update: UserUpdate,
     current_user: dict = Depends(get_current_user)
 ):
     """Update the current user's profile."""
     try:
+        # Log request headers and body
+        print(f"Request headers: {dict(request.headers)}")
+        print(f"Request body: {user_update.model_dump()}")
+        print(f"Current user: {current_user}")
+
         # Convert to dict and handle URL serialization
         raw_data = user_update.model_dump(exclude_unset=True)
         update_data = {}
         
         # Process each field to ensure JSON serializable
         for key, value in raw_data.items():
-            if hasattr(value, 'url'):  # Handle URL objects
+            if hasattr(value, 'url'):
                 update_data[key] = str(value)
             elif isinstance(value, (str, int, float, bool, type(None))):
                 update_data[key] = value
@@ -635,7 +641,7 @@ async def update_current_user_profile(
         from ....core.supabase import get_supabase_client
         supabase = get_supabase_client()
         
-        # Update user - remove await since Supabase client methods are synchronous
+        # Update user
         result = supabase.from_("users")\
             .update(update_data)\
             .eq("id", current_user["id"])\
