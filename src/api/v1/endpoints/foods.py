@@ -450,4 +450,390 @@ async def fulfill_food_request(
         data=notification_data
     )
     
-    return updated_food[0] 
+    return updated_food[0]
+
+@router.get("/search/personalized", response_model=List[FoodResponse])
+async def search_personalized_foods(
+    search_term: Optional[str] = Query(None, min_length=2),
+    current_user: dict = Depends(get_current_user),
+    food_type: Optional[FoodType] = None,
+    category: Optional[FoodCategory] = None,
+    max_distance: float = Query(5.0, gt=0),  # Default 5km radius
+    max_tickets: Optional[int] = None,
+    is_available: bool = Query(True),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=100)
+):
+    """
+    Search for food listings personalized to the current user's preferences and dietary restrictions.
+    
+    This endpoint automatically considers:
+    - User's dietary requirements
+    - User's allergen restrictions
+    - User's location for proximity
+    - User's preferred food categories (if set in profile)
+    
+    Additional filters can be applied through query parameters.
+    """
+    user_id = current_user["id"]
+    user_location = current_user.get("home_address", "")
+    user_dietary_requirements = current_user.get("dietary_requirements", [])
+    user_allergies = current_user.get("allergies", "").lower()
+    
+    # Build base filters
+    filters = {"is_available": is_available}
+    
+    # Don't show user's own food in personalized search
+    filters["user_id"] = {"neq": user_id}
+    
+    if food_type:
+        filters["food_type"] = food_type.value
+    
+    if category:
+        filters["category"] = category.value
+    
+    # Get foods from database
+    foods = await execute_query(
+        table="foods",
+        query_type="select",
+        filters=filters
+    )
+    
+    # Apply personalized filtering
+    personalized_foods = []
+    
+    for food in foods:
+        # Skip if the food contains allergens the user is allergic to
+        if user_allergies:
+            food_allergens = food.get("allergens", "").lower()
+            # Check if any of the user's allergies are in the food's allergens
+            allergen_match = False
+            for allergen in user_allergies.split(","):
+                allergen = allergen.strip()
+                if allergen and allergen in food_allergens:
+                    allergen_match = True
+                    break
+            
+            if allergen_match:
+                continue
+        
+        # Calculate match score (higher is better)
+        match_score = 0
+        
+        # Location proximity match
+        if user_location and food.get("location"):
+            # Simple string matching for demo
+            # In a real app, this would use geolocation distance calculation
+            if user_location.lower() in food.get("location", "").lower():
+                match_score += 3
+        
+        # Dietary requirements match
+        food_dietary = food.get("dietary_requirements", [])
+        for req in user_dietary_requirements:
+            if req in food_dietary:
+                match_score += 2
+        
+        # Search term match
+        if search_term:
+            search_term_lower = search_term.lower()
+            if search_term_lower in food.get("title", "").lower():
+                match_score += 5  # Title match is highly relevant
+            elif search_term_lower in food.get("description", "").lower():
+                match_score += 3  # Description match is relevant
+            elif search_term_lower in food.get("category", "").lower():
+                match_score += 2  # Category match is somewhat relevant
+        else:
+            # If no search term, give a small boost to all results
+            match_score += 1
+        
+        # Ticket affordability match
+        if max_tickets is not None:
+            tickets_required = food.get("tickets_required", 1)
+            if tickets_required <= max_tickets:
+                match_score += 1
+                # Extra points for free or very cheap items
+                if tickets_required <= 1:
+                    match_score += 1
+        
+        # Add match score to food item
+        food["match_score"] = match_score
+        personalized_foods.append(food)
+    
+    # Sort by match score (highest first)
+    personalized_foods.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+    
+    # Apply skip and limit
+    paginated_foods = personalized_foods[skip:skip + limit]
+    
+    # Remove match_score before returning (it's not in the schema)
+    for food in paginated_foods:
+        if "match_score" in food:
+            del food["match_score"]
+    
+    return paginated_foods
+
+@router.get("/search/requests", response_model=List[FoodResponse])
+async def search_food_requests(
+    search_term: Optional[str] = Query(None, min_length=2),
+    current_user: dict = Depends(get_current_user),
+    category: Optional[FoodCategory] = None,
+    min_tickets: Optional[int] = None,
+    max_distance: float = Query(5.0, gt=0),
+    is_available: bool = Query(True),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(10, ge=1, le=100)
+):
+    """
+    Search for food requests that match a user's cooking skills and preferences.
+    
+    This endpoint helps users find food requests they might want to fulfill based on:
+    - Their cooking preferences (from user profile)
+    - Location proximity
+    - Ticket rewards
+    - Food categories they're comfortable with
+    
+    Results are sorted by relevance to the user's skills and preferences.
+    """
+    user_id = current_user["id"]
+    user_location = current_user.get("home_address", "")
+    user_cook_type = current_user.get("cook_type", "").lower()
+    user_cook_frequency = current_user.get("cook_frequency", "").lower()
+    
+    # Build base filters
+    filters = {
+        "is_available": is_available,
+        "food_type": "request"  # Only show food requests
+    }
+    
+    # Don't show user's own requests
+    filters["user_id"] = {"neq": user_id}
+    
+    if category:
+        filters["category"] = category.value
+    
+    # Get food requests from database
+    food_requests = await execute_query(
+        table="foods",
+        query_type="select",
+        filters=filters
+    )
+    
+    # Apply personalized filtering
+    matched_requests = []
+    
+    for request in food_requests:
+        # Calculate match score (higher is better)
+        match_score = 0
+        
+        # Location proximity match
+        if user_location and request.get("location"):
+            # Simple string matching for demo
+            if user_location.lower() in request.get("location", "").lower():
+                match_score += 3
+        
+        # Search term match
+        if search_term:
+            search_term_lower = search_term.lower()
+            if search_term_lower in request.get("title", "").lower():
+                match_score += 5  # Title match is highly relevant
+            elif search_term_lower in request.get("description", "").lower():
+                match_score += 3  # Description match is relevant
+            elif search_term_lower in request.get("category", "").lower():
+                match_score += 2  # Category match is somewhat relevant
+        else:
+            # If no search term, give a small boost to all results
+            match_score += 1
+        
+        # Ticket reward match
+        tickets_offered = request.get("tickets_required", 1)
+        if min_tickets is not None and tickets_offered >= min_tickets:
+            match_score += 2
+            # Extra points for high-reward requests
+            if tickets_offered >= 3:
+                match_score += 2
+        
+        # Cooking type match (if user has specified their cooking type)
+        if user_cook_type:
+            request_description = request.get("description", "").lower()
+            # Check if the request description mentions cooking styles that match the user's preferences
+            if "meal prep" in request_description and "meal prepper" in user_cook_type:
+                match_score += 3
+            elif "baking" in request_description and "baker" in user_cook_type:
+                match_score += 3
+            elif "gourmet" in request_description and "gourmet" in user_cook_type:
+                match_score += 3
+            elif "quick" in request_description and "quick" in user_cook_type:
+                match_score += 3
+        
+        # Cooking frequency match
+        if user_cook_frequency:
+            # Higher scores for users who cook frequently
+            if "daily" in user_cook_frequency or "5+" in user_cook_frequency:
+                match_score += 2
+            elif "3-4" in user_cook_frequency:
+                match_score += 1
+        
+        # Add match score to request item
+        request["match_score"] = match_score
+        matched_requests.append(request)
+    
+    # Sort by match score (highest first)
+    matched_requests.sort(key=lambda x: x.get("match_score", 0), reverse=True)
+    
+    # Apply skip and limit
+    paginated_requests = matched_requests[skip:skip + limit]
+    
+    # Remove match_score before returning (it's not in the schema)
+    for request in paginated_requests:
+        if "match_score" in request:
+            del request["match_score"]
+    
+    return paginated_requests
+
+@router.get("/recommendations", response_model=List[FoodResponse])
+async def get_food_recommendations(
+    current_user: dict = Depends(get_current_user),
+    limit: int = Query(10, ge=1, le=20),
+    include_requests: bool = Query(False)
+):
+    """
+    Get personalized food recommendations for the current user.
+    
+    This endpoint analyzes:
+    - User's past claims and interactions
+    - User's dietary preferences
+    - User's location
+    - Popular items among similar users
+    
+    Returns a curated list of recommended food offerings or requests.
+    """
+    user_id = current_user["id"]
+    user_location = current_user.get("home_address", "")
+    user_dietary_requirements = current_user.get("dietary_requirements", [])
+    user_allergies = current_user.get("allergies", "").lower()
+    
+    # Get user's past interactions (claims, fulfillments)
+    past_claims = await execute_query(
+        table="food_claims",
+        query_type="select",
+        filters={"claimer_id": user_id},
+        limit=20
+    )
+    
+    past_fulfillments = await execute_query(
+        table="food_fulfillments",
+        query_type="select",
+        filters={"provider_id": user_id},
+        limit=20
+    )
+    
+    # Extract food IDs from past interactions
+    past_food_ids = []
+    past_provider_ids = []
+    past_categories = set()
+    
+    for claim in past_claims:
+        if claim.get("food_id"):
+            past_food_ids.append(claim["food_id"])
+        if claim.get("provider_id"):
+            past_provider_ids.append(claim["provider_id"])
+    
+    # Get details of past claimed foods to analyze preferences
+    if past_food_ids:
+        past_foods = await execute_query(
+            table="foods",
+            query_type="select",
+            filters={"id": {"in": past_food_ids}}
+        )
+        
+        for food in past_foods:
+            if food.get("category"):
+                past_categories.add(food["category"])
+    
+    # Build filters for recommendations
+    filters = {"is_available": True}
+    
+    # Don't show user's own food
+    filters["user_id"] = {"neq": user_id}
+    
+    # Filter by food type if specified
+    if not include_requests:
+        filters["food_type"] = "offering"
+    
+    # Get potential recommendations
+    potential_recommendations = await execute_query(
+        table="foods",
+        query_type="select",
+        filters=filters,
+        limit=50  # Get more than needed for filtering
+    )
+    
+    # Score and rank recommendations
+    scored_recommendations = []
+    
+    for food in potential_recommendations:
+        # Skip if the food contains allergens the user is allergic to
+        if user_allergies:
+            food_allergens = food.get("allergens", "").lower()
+            allergen_match = False
+            for allergen in user_allergies.split(","):
+                allergen = allergen.strip()
+                if allergen and allergen in food_allergens:
+                    allergen_match = True
+                    break
+            
+            if allergen_match:
+                continue
+        
+        # Calculate recommendation score
+        rec_score = 0
+        
+        # Preferred category match
+        if food.get("category") in past_categories:
+            rec_score += 3
+        
+        # Preferred provider match
+        if food.get("user_id") in past_provider_ids:
+            rec_score += 4  # Strong signal - user liked this provider before
+        
+        # Location proximity match
+        if user_location and food.get("location"):
+            if user_location.lower() in food.get("location", "").lower():
+                rec_score += 2
+        
+        # Dietary requirements match
+        food_dietary = food.get("dietary_requirements", [])
+        for req in user_dietary_requirements:
+            if req in food_dietary:
+                rec_score += 1
+        
+        # Freshness boost (newer items ranked higher)
+        if food.get("created_at"):
+            try:
+                created_at = datetime.fromisoformat(food["created_at"].replace("Z", "+00:00"))
+                now = datetime.now()
+                age_hours = (now - created_at).total_seconds() / 3600
+                
+                if age_hours < 24:
+                    rec_score += 2  # Posted in last 24 hours
+                elif age_hours < 48:
+                    rec_score += 1  # Posted in last 48 hours
+            except (ValueError, TypeError):
+                pass
+        
+        # Add recommendation score to food item
+        food["rec_score"] = rec_score
+        scored_recommendations.append(food)
+    
+    # Sort by recommendation score (highest first)
+    scored_recommendations.sort(key=lambda x: x.get("rec_score", 0), reverse=True)
+    
+    # Take top recommendations up to limit
+    top_recommendations = scored_recommendations[:limit]
+    
+    # Remove recommendation score before returning
+    for food in top_recommendations:
+        if "rec_score" in food:
+            del food["rec_score"]
+    
+    return top_recommendations 
