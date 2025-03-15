@@ -44,16 +44,15 @@ class UserCreate(UserBase):
     password: str = Field(..., min_length=8)
 
 class UserUpdate(BaseModel):
-    first_name: Optional[str] = Field(None, min_length=1, max_length=50)
-    last_name: Optional[str] = Field(None, min_length=1, max_length=50)
-    bio: Optional[str] = Field(None, min_length=10, max_length=500)
-    cook_type: Optional[CookType] = None
-    cook_frequency: Optional[CookFrequency] = None
-    dietary_requirements: Optional[List[DietaryRequirement]] = None
-    allergies: Optional[str] = Field(None, max_length=200)
-    purpose: Optional[Purpose] = None
-    home_address: Optional[str] = Field(None, min_length=5, max_length=200)
-    profile_picture: Optional[HttpUrl] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    bio: Optional[str] = None
+    cook_type: Optional[str] = None
+    cook_frequency: Optional[str] = None
+    dietary_requirements: Optional[List[str]] = None
+    allergies: Optional[str] = None
+    purpose: Optional[str] = None
+    home_address: Optional[str] = None
 
 class UserResponse(BaseModel):
     id: UUID4

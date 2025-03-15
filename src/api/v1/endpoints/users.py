@@ -599,55 +599,35 @@ async def get_current_user_profile(
 
 @router.patch("/me", response_model=UserResponse)
 async def update_current_user_profile(
-    request: Request,  # Remove Depends()
     user_update: UserUpdate,
     current_user: dict = Depends(get_current_user)
 ):
     """Update the current user's profile."""
     try:
-        # Log request headers and body
-        print(f"Request headers: {dict(request.headers)}")
-        print(f"Request body: {user_update.model_dump()}")
-        print(f"Current user: {current_user}")
-
-        # Convert to dict and handle URL serialization
-        raw_data = user_update.model_dump(exclude_unset=True)
-        update_data = {}
+        # Convert to dict and exclude unset values
+        update_data = user_update.model_dump(exclude_unset=True)
         
-        # Process each field to ensure JSON serializable
-        for key, value in raw_data.items():
-            if hasattr(value, 'url'):
-                update_data[key] = str(value)
-            elif isinstance(value, (str, int, float, bool, type(None))):
-                update_data[key] = value
-            elif isinstance(value, list):
-                update_data[key] = [str(item) if hasattr(item, 'url') else item for item in value]
-            else:
-                update_data[key] = str(value)
-
+        # Add updated timestamp
         update_data["updated_at"] = datetime.now().isoformat()
 
-        # Get Supabase client
-        from ....core.supabase import get_supabase_client
-        supabase = get_supabase_client()
+        # Update user in database
+        updated_user = await execute_query(
+            table="users",
+            query_type="update",
+            filters={"id": current_user["id"]},
+            data=update_data
+        )
         
-        # Update user
-        result = supabase.from_("users")\
-            .update(update_data)\
-            .eq("id", current_user["id"])\
-            .execute()
-
-        if not result or not result.data:
+        if not updated_user:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to update user profile"
             )
             
-        return result.data[0]
+        return updated_user[0]
         
     except Exception as e:
         print(f"Error updating user profile: {str(e)}")
-        print(f"Update data: {update_data}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update user profile: {str(e)}"
