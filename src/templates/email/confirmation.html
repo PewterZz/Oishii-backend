@@ -8,64 +8,67 @@
         body {
             font-family: Arial, sans-serif;
             line-height: 1.6;
-            color: #333;
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
+            margin: 0;
+            padding: 0;
+            background-color: #f4f4f4;
         }
         .container {
-            background-color: #f9f9f9;
+            max-width: 600px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: #ffffff;
             border-radius: 8px;
-            padding: 30px;
-            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
         .header {
             text-align: center;
-            margin-bottom: 30px;
+            padding: 20px 0;
         }
-        .logo {
-            max-width: 150px;
-            margin-bottom: 20px;
-        }
-        .button {
-            display: inline-block;
-            background-color: #4CAF50;
-            color: white;
-            padding: 12px 25px;
-            text-decoration: none;
-            border-radius: 4px;
+        .code {
+            text-align: center;
+            font-size: 32px;
+            letter-spacing: 4px;
+            font-weight: bold;
+            color: #333;
+            padding: 20px;
             margin: 20px 0;
+            background-color: #f8f8f8;
+            border-radius: 4px;
         }
         .footer {
             text-align: center;
-            font-size: 12px;
             color: #666;
-            margin-top: 30px;
+            font-size: 12px;
+            margin-top: 20px;
+        }
+        .button {
+            display: inline-block;
+            padding: 10px 20px;
+            background-color: #4CAF50;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            margin: 20px 0;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>Welcome to Oishii!</h1>
+            <h2>Welcome to Oishii!</h2>
         </div>
         
-        <p>Hi {{ .Email }},</p>
+        <p>Thank you for registering. To complete your registration, please use the verification code below:</p>
         
-        <p>Thank you for signing up with Oishii. To complete your registration and start sharing delicious meals, please verify your email address by clicking the button below:</p>
-        
-        <div style="text-align: center;">
-            <a href="{{ .ConfirmationURL }}" class="button">Verify Email Address</a>
+        <div class="code">
+            {{ .Token }}
         </div>
         
-        <p>Or copy and paste this URL into your browser:</p>
-        <p style="word-break: break-all;">{{ .ConfirmationURL }}</p>
-        
-        <p>This link will expire in 24 hours. If you did not create an account with Oishii, please ignore this email.</p>
+        <p>This code will expire in 24 hours. If you did not request this code, please ignore this email.</p>
         
         <div class="footer">
-            <p>This email was sent from {{ .SiteURL }}</p>
-            <p>© 2024 Oishii. All rights reserved.</p>
+            <p>This is an automated message, please do not reply to this email.</p>
+            <p>© Oishii. All rights reserved.</p>
         </div>
     </div>
 </body>

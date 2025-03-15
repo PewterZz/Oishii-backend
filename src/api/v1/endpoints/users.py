@@ -204,24 +204,38 @@ async def register(user_data: UserCreate):
         hashed_password = pwd_context.hash(user_data.password)
         
         # Sign up with Supabase
-        api_url = os.getenv("API_URL", "http://localhost:8000")
-        redirect_url = f"{api_url}/api/v1/users/callback"
+        # Sign up with Supabase with retry logic
+        supabase = get_supabase_client()
+        max_retries = 3
+        auth_response = None
         
-        auth_response = await sign_up(user_data.email, user_data.password, user_data.dict(exclude={"password"}), redirect_url)
+        for attempt in range(max_retries):
+            try:
+                auth_response = supabase.auth.sign_up({
+                    "email": user_data.email,
+                    "password": user_data.password
+                })
+                if auth_response and auth_response.user:
+                    break
+            except Exception as e:
+                print(f"Supabase signup attempt {attempt + 1} failed: {str(e)}")
+                if attempt == max_retries - 1:  # Last attempt
+                    raise
+                continue
         
-        if not auth_response:
+        if not auth_response or not auth_response.user:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to create user"
+                detail="Failed to create user in Supabase"
             )
             
         # Create user in our database
         user_data_dict = user_data.dict()
         user_data_dict.update({
-            "id": auth_response["id"],
-            "email": auth_response["email"],
+            "id": auth_response.user.id,
+            "email": auth_response.user.email,
             "is_verified": False,
-            "password": hashed_password,  # Add the hashed password
+            "password": hashed_password,
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat()
         })
@@ -233,12 +247,17 @@ async def register(user_data: UserCreate):
         )
         
         if not new_user:
+            try:
+                await supabase.auth.admin.delete_user(auth_response.user.id)
+            except Exception as cleanup_error:
+                print(f"Failed to cleanup Supabase user: {cleanup_error}")
+            
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to create user in database"
             )
         
-        # Remove password from response
+        # Remove sensitive data from response
         user_response = new_user[0]
         if "password" in user_response:
             del user_response["password"]
@@ -246,6 +265,8 @@ async def register(user_data: UserCreate):
         return user_response
             
     except Exception as e:
+        print(f"Registration error: {str(e)}")
+        print(f"Error type: {type(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to register user: {str(e)}"
@@ -373,101 +394,67 @@ async def auth_callback(
     email: str = Query(None),
     next: str = Query(None)
 ):
-    """
-    Handle Supabase auth callback for email verification.
-    This endpoint processes the token_hash and type parameters from Supabase.
-    """
+    """Handle Supabase auth callback for email verification."""
     try:
         print(f"Auth callback received: token_hash={token_hash}, type={type}, email={email}")
         
         if not token_hash or not type:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing required parameters: token_hash and type"
+                detail="Missing required parameters"
             )
+
+        # Get Supabase client
+        from ....core.supabase import get_supabase_client
+        supabase = get_supabase_client()
         
-        # Verify the token with Supabase
         try:
-            from ....core.supabase import supabase
-            
-            # Call Supabase's verifyOtp method
+            # Verify OTP using the token_hash
             verify_response = await supabase.auth.verify_otp({
                 "token_hash": token_hash,
                 "type": type
             })
             
-            print(f"Verification response: {verify_response}")
-            
-            # Get the user from the response
-            user = verify_response.user
-            if not user:
+            if not verify_response or not verify_response.user:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Failed to verify user - no user in response"
+                    detail="Invalid verification token"
                 )
+
+            user_email = verify_response.user.email
             
-            print(f"User from verification: {user.email}")
-            
-            # Update the user's verification status in our database
-            db_user = await execute_query(
-                table="users",
-                query_type="select",
-                filters={"email": user.email}
-            )
-            
-            if not db_user or len(db_user) == 0:
-                # Try with the email parameter if provided
-                if email:
-                    db_user = await execute_query(
-                        table="users",
-                        query_type="select",
-                        filters={"email": email}
-                    )
-                
-                if not db_user or len(db_user) == 0:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"User not found in database for email: {user.email}"
-                    )
-            
-            db_user = db_user[0]
-            user_id = db_user["id"]
-            
-            print(f"Found user in database: {db_user['email']}")
-            
-            # Update user verification status
+            # Update user verification in database
             updated_user = await execute_query(
                 table="users",
                 query_type="update",
-                filters={"id": user_id},
-                data={"is_verified": True, "updated_at": datetime.now().isoformat()}
+                filters={"email": user_email},
+                data={
+                    "is_verified": True,
+                    "updated_at": datetime.now().isoformat()
+                }
             )
             
             if not updated_user:
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail="Failed to update user verification status"
+                    detail="Failed to update verification status"
                 )
-            
-            print(f"Successfully updated user verification status for {db_user['email']}")
-            
-            # Redirect to frontend if available
-            frontend_url = os.getenv("FRONTEND_URL")
-            if frontend_url:
-                from fastapi.responses import RedirectResponse
-                return RedirectResponse(url=f"{frontend_url}/login?verified=true")
-            
-            return {"message": "Email verified successfully"}
-            
-        except Exception as e:
-            print(f"Error verifying token: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid verification token: {str(e)}"
+
+            # Redirect to frontend
+            frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(
+                url=f"{frontend_url}/auth/verified?success=true",
+                status_code=status.HTTP_302_FOUND
             )
             
-    except HTTPException:
-        raise
+        except Exception as e:
+            print(f"Verification error: {str(e)}")
+            return RedirectResponse(
+                url=f"{frontend_url}/auth/error?message=verification_failed",
+                status_code=status.HTTP_302_FOUND
+            )
+            
     except Exception as e:
         print(f"Callback error: {str(e)}")
         raise HTTPException(
@@ -702,4 +689,133 @@ async def check_auth(current_user: dict = Depends(get_current_user)):
     """
     Check if the current user is authenticated.
     """
-    return {"authenticated": True, "user_id": current_user["id"]} 
+    return {"authenticated": True, "user_id": current_user["id"]}
+
+@router.post("/verify-code")
+async def verify_code(email: str = Query(...), code: str = Query(...)):
+    """Verify a user's email using the verification code."""
+    try:
+        # Get user from database
+        user = await execute_query(
+            table="users",
+            query_type="select",
+            filters={"email": email}
+        )
+        
+        if not user or len(user) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        user = user[0]
+        
+        # Check if user is already verified
+        if user.get("is_verified"):
+            return {"message": "Email already verified"}
+        
+        # Verify with Supabase
+        supabase = get_supabase_client()
+        try:
+            verify_response = supabase.auth.verify_otp({
+                "email": email,
+                "token": code,
+                "type": "signup"
+            })
+            
+            if not verify_response or not verify_response.user:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Invalid verification code"
+                )
+        except Exception as e:
+            print(f"Supabase verification error: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid verification code"
+            )
+        
+        # Update our database
+        updated_user = await execute_query(
+            table="users",
+            query_type="update",
+            filters={"id": user["id"]},
+            data={
+                "is_verified": True,
+                "updated_at": datetime.now().isoformat()
+            }
+        )
+        
+        if not updated_user:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update verification status"
+            )
+        
+        return {"message": "Email verified successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Verification error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Verification failed: {str(e)}"
+        )
+
+@router.post("/resend-code")
+async def resend_verification_code(email: str = Query(...)):
+    """Resend verification code to user's email."""
+    try:
+        # Get user from database
+        user = await execute_query(
+            table="users",
+            query_type="select",
+            filters={"email": email}
+        )
+        
+        if not user or len(user) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        user = user[0]
+        
+        # Check if user is already verified
+        if user.get("is_verified"):
+            return {"message": "Email already verified"}
+        
+        # Generate new verification code
+        new_code = generate_verification_code()
+        
+        # Update user with new verification code
+        updated_user = await execute_query(
+            table="users",
+            query_type="update",
+            filters={"id": user["id"]},
+            data={
+                "verification_code": new_code,
+                "verification_code_expires": (datetime.now() + timedelta(hours=24)).isoformat(),
+                "updated_at": datetime.now().isoformat()
+            }
+        )
+        
+        if not updated_user:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to update verification code"
+            )
+        
+        # Send new verification email
+        await send_verification_email(email, new_code)
+        
+        return {"message": "Verification code resent successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to resend verification code: {str(e)}"
+        ) 
