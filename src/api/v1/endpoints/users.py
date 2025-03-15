@@ -599,10 +599,13 @@ async def get_dev_token(
         )
 
 @router.get("/me", response_model=UserResponse)
-async def get_current_user_profile(current_user: dict = Depends(get_current_user)):
+async def get_current_user_profile(
+    request: Request,
+    current_user: dict = Depends(get_current_user)
+):
     """Get the current user's profile."""
-    #log the headers request
-    print(f"headers: {respon.headers}")
+    # Log the headers request
+    print(f"Request headers: {dict(request.headers)}")
     print(f"Current user: {current_user}")
     
     return current_user
