@@ -7,7 +7,7 @@ from ....schemas.user import DietaryRequirement
 from ...v1.endpoints.users import get_current_user
 from ....core.supabase import execute_query
 
-router = APIRouter(prefix="/foods", tags=["foods"])
+router = APIRouter(tags=["foods"])
 
 @router.post("/", response_model=FoodResponse, status_code=status.HTTP_201_CREATED)
 async def create_food(

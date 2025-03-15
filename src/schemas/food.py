@@ -35,7 +35,7 @@ class FoodCreate(FoodBase):
     
     @validator('expiry_date')
     def validate_expiry_date(cls, v):
-        if v and v < datetime.now():
+        if v and v < datetime.now(v.tzinfo):
             raise ValueError("Expiry date cannot be in the past")
         return v
 
@@ -56,7 +56,7 @@ class FoodUpdate(BaseModel):
     
     @validator('expiry_date')
     def validate_expiry_date(cls, v):
-        if v and v < datetime.now():
+        if v and v < datetime.now(v.tzinfo):
             raise ValueError("Expiry date cannot be in the past")
         return v
 

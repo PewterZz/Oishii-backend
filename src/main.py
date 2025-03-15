@@ -8,6 +8,9 @@ from dotenv import load_dotenv
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+import asyncio
+from .core.scheduler import run_scheduled_tasks
+from .core.datastax import initialize_datastax
 
 # Load environment variables
 load_dotenv()
@@ -16,14 +19,34 @@ load_dotenv()
 APP_NAME = os.getenv("APP_NAME", "Oishii API")
 DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Connect to Supabase
+    # Startup: Connect to Supabase and start scheduler
     print(f"Starting up: Connected to Supabase in {ENVIRONMENT} environment")
+    
+    # Initialize DataStax
+    await initialize_datastax()
+    print("Initialized DataStax connection and tables")
+    
+    # Start scheduler in a background task
+    if ENVIRONMENT == "production":
+        task = asyncio.create_task(run_scheduled_tasks())
+        print("Started scheduler for background tasks")
+    
     yield
+    
     # Shutdown: Clean up resources
     print("Shutting down")
+    
+    # Cancel scheduler task if it exists
+    if ENVIRONMENT == "production" and "task" in locals():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            print("Scheduler task cancelled")
 
 app = FastAPI(
     title=APP_NAME,
@@ -64,14 +87,26 @@ app = FastAPI(
 )
 
 # Configure CORS
-origins = ["*"]  # In development, allow all origins
+# Default origins for development
+origins = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    FRONTEND_URL,  # Include the frontend URL from environment
+]
+
+# Add production origins if in production environment
 if ENVIRONMENT == "production":
-    origins = [
+    production_origins = [
         "https://oishii.app",
         "https://www.oishii.app",
         "https://oishii-backend.fly.dev",
         "https://oishii-frontend.fly.dev",
     ]
+    origins.extend(production_origins)
+
+print(f"CORS origins: {origins}")
 
 app.add_middleware(
     CORSMiddleware,

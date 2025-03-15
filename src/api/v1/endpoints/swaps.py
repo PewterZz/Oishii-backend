@@ -9,6 +9,7 @@ from ...v1.endpoints.users import get_current_user
 router = APIRouter(prefix="/swaps", tags=["swaps"])
 
 class SwapStatus(str, Enum):
+    POTENTIAL = "potential"  # For potential swaps that haven't been requested yet
     PENDING = "pending"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
@@ -419,4 +420,137 @@ async def get_swap_detail(
         "provider_food": provider_food[0]
     }
     
-    return swap_detail 
+    return swap_detail
+
+@router.get("/nearby", response_model=List[SwapDetailResponse])
+async def get_nearby_swaps(
+    radius: float = Query(5.0, description="Search radius in kilometers", ge=0.1, le=50.0),
+    status: Optional[SwapStatus] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get food swaps available near the current user's location.
+    
+    This endpoint returns food swaps from users within the specified radius (in kilometers)
+    of the current user's location.
+    """
+    try:
+        # Get the current user's location
+        user_result = await execute_query(
+            table="users",
+            query_type="select",
+            filters={"id": current_user["id"]}
+        )
+        
+        if not user_result or len(user_result) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        user_location = user_result[0].get("location")
+        
+        if not user_location:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User location not set"
+            )
+        
+        # First, find nearby users
+        nearby_users_query = """
+        SELECT id
+        FROM users
+        WHERE id != %s
+        AND location IS NOT NULL
+        AND ST_DWithin(
+            ST_SetSRID(ST_MakePoint(
+                (location->>'longitude')::float,
+                (location->>'latitude')::float
+            ), 4326)::geography,
+            ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
+            %s
+        )
+        """
+        
+        nearby_users_params = [
+            current_user["id"],
+            user_location["longitude"],
+            user_location["latitude"],
+            radius * 1000  # Convert km to meters
+        ]
+        
+        nearby_users_result = await execute_query(
+            query_type="raw",
+            query=nearby_users_query,
+            params=nearby_users_params
+        )
+        
+        if not nearby_users_result or len(nearby_users_result) == 0:
+            return []
+        
+        # Extract user IDs
+        nearby_user_ids = [user["id"] for user in nearby_users_result]
+        
+        # Find foods from nearby users that are available for swap
+        foods_query = """
+        SELECT f.*
+        FROM foods f
+        WHERE f.user_id = ANY(%s)
+        AND f.is_available = true
+        """
+        
+        foods_params = [nearby_user_ids]
+        
+        foods_result = await execute_query(
+            query_type="raw",
+            query=foods_query,
+            params=foods_params
+        )
+        
+        if not foods_result or len(foods_result) == 0:
+            return []
+        
+        # Get the current user's foods
+        user_foods_result = await execute_query(
+            table="foods",
+            query_type="select",
+            filters={"user_id": current_user["id"], "is_available": True}
+        )
+        
+        if not user_foods_result or len(user_foods_result) == 0:
+            # User has no foods to swap
+            return []
+        
+        # Create virtual swap objects for each potential swap
+        nearby_swaps = []
+        
+        for user_food in user_foods_result:
+            for nearby_food in foods_result:
+                # Skip foods from the same user
+                if nearby_food["user_id"] == current_user["id"]:
+                    continue
+                
+                # Create a virtual swap object
+                swap = {
+                    "id": None,  # This is a virtual swap, not yet created
+                    "requester_id": current_user["id"],
+                    "provider_id": nearby_food["user_id"],
+                    "requester_food_id": user_food["id"],
+                    "provider_food_id": nearby_food["id"],
+                    "message": None,
+                    "response_message": None,
+                    "status": "potential",  # This is a potential swap
+                    "created_at": datetime.now().isoformat(),
+                    "updated_at": datetime.now().isoformat(),
+                    "requester_food": user_food,
+                    "provider_food": nearby_food
+                }
+                
+                nearby_swaps.append(swap)
+        
+        return nearby_swaps
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        ) 

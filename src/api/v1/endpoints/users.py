@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from ....schemas.user import UserCreate, UserResponse, UserUpdate, Token, TokenData, VerificationRequest
+from ....schemas.user import UserCreate, UserResponse, UserUpdate, Token, TokenData, VerificationRequest, Location
 from ....core.supabase import execute_query, sign_up, sign_in, get_user, get_supabase_client, execute_raw_sql, check_user_exists
 import random
 import string
@@ -45,7 +45,17 @@ oauth2_scheme = OAuth2PasswordBearer(
 )
 
 def verify_password(plain_password, hashed_password):
-    return pwd_context.verify(plain_password, hashed_password)
+    print(f"Verifying password: plain_password length={len(plain_password) if plain_password else 0}, hashed_password length={len(hashed_password) if hashed_password else 0}")
+    if not plain_password or not hashed_password:
+        print("Missing password or hash")
+        return False
+    try:
+        result = pwd_context.verify(plain_password, hashed_password)
+        print(f"Password verification result: {result}")
+        return result
+    except Exception as e:
+        print(f"Password verification error: {str(e)}")
+        return False
 
 def get_password_hash(password):
     return pwd_context.hash(password)
@@ -276,10 +286,9 @@ async def register(user_data: UserCreate):
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     """Log in a user and return an access token."""
     try:
-        # Authenticate with Supabase
-        auth_response = await sign_in(form_data.username, form_data.password)
+        print(f"Login attempt for username: {form_data.username}")
         
-        # Get user from database
+        # Get user from database first
         user = await execute_query(
             table="users",
             query_type="select",
@@ -287,25 +296,49 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         )
         
         if not user:
+            print(f"No user found with email: {form_data.username}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid credentials"
             )
         
         user = user[0]
+        print(f"User found: {user.get('email')}, has password: {'password' in user}")
         
         # Check if user is verified
         if not user.get("is_verified"):
+            print(f"User not verified: {user.get('email')}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Please verify your email before logging in"
             )
         
+        # Try to authenticate with Supabase first
+        try:
+            auth_response = await sign_in(form_data.username, form_data.password)
+            # If we get here, Supabase auth succeeded
+            print("Supabase authentication successful")
+        except Exception as supabase_error:
+            print(f"Supabase authentication failed: {str(supabase_error)}")
+            
+            # Fallback to local password verification
+            if not verify_password(form_data.password, user.get("password", "")):
+                print("Local password verification failed")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid credentials"
+                )
+            print("Local password verification successful")
+        
         # Create access token
         access_token = create_access_token(data={"sub": user["id"]})
         return {"access_token": access_token, "token_type": "bearer"}
         
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
     except Exception as e:
+        print(f"Login error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials"
@@ -632,6 +665,158 @@ async def update_current_user_profile(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update user profile: {str(e)}"
         )
+
+@router.post("/me/location", response_model=UserResponse)
+async def update_user_location(
+    location: Location,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Update the current user's location.
+    
+    This endpoint accepts latitude, longitude, and a formatted address.
+    The location will be stored in the user's profile.
+    """
+    try:
+        # Simply store the location data as provided by the frontend
+        location_data = {
+            "location": {
+                "latitude": location.latitude,
+                "longitude": location.longitude,
+                "formatted_address": location.formatted_address
+            }
+        }
+        
+        result = await execute_query(
+            table="users",
+            query_type="update",
+            data=location_data,
+            filters={"id": current_user["id"]}
+        )
+        
+        if not result or len(result) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Return the updated user profile
+        updated_user = await get_user_profile(current_user["id"])
+        return updated_user
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+@router.get("/nearby", response_model=List[UserResponse])
+async def get_nearby_users(
+    radius: float = Query(5.0, description="Search radius in kilometers", ge=0.1, le=50.0),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get users near the current user's location.
+    
+    This endpoint returns users within the specified radius (in kilometers)
+    of the current user's location.
+    """
+    try:
+        # Get the current user's location
+        user_result = await execute_query(
+            table="users",
+            query_type="select",
+            filters={"id": current_user["id"]}
+        )
+        
+        if not user_result or len(user_result) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        user_location = user_result[0].get("location")
+        
+        if not user_location:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User location not set"
+            )
+        
+        # Use raw SQL to find nearby users using PostGIS
+        # This assumes the database has PostGIS extension enabled
+        # and the users table has a location column of type jsonb
+        query = """
+        SELECT *
+        FROM users
+        WHERE id != %s
+        AND location IS NOT NULL
+        AND ST_DWithin(
+            ST_SetSRID(ST_MakePoint(
+                (location->>'longitude')::float,
+                (location->>'latitude')::float
+            ), 4326)::geography,
+            ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography,
+            %s
+        )
+        LIMIT 50
+        """
+        
+        params = [
+            current_user["id"],
+            user_location["longitude"],
+            user_location["latitude"],
+            radius * 1000  # Convert km to meters
+        ]
+        
+        nearby_users = await execute_raw_sql(query, params)
+        
+        # Format the response
+        return [format_user_response(user) for user in nearby_users]
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
+        )
+
+# Helper function to format user response
+def format_user_response(user_data):
+    """Format user data for response"""
+    return {
+        "id": user_data["id"],
+        "email": user_data["email"],
+        "first_name": user_data["first_name"],
+        "last_name": user_data["last_name"],
+        "bio": user_data["bio"],
+        "cook_type": user_data["cook_type"],
+        "cook_frequency": user_data["cook_frequency"],
+        "dietary_requirements": user_data["dietary_requirements"],
+        "allergies": user_data["allergies"],
+        "purpose": user_data["purpose"],
+        "home_address": user_data["home_address"],
+        "location": user_data.get("location"),
+        "profile_picture": user_data.get("profile_picture"),
+        "created_at": user_data.get("created_at"),
+        "updated_at": user_data.get("updated_at"),
+        "swap_rating": user_data.get("swap_rating"),
+        "is_verified": user_data.get("is_verified", False)
+    }
+
+# Helper function to get user profile
+async def get_user_profile(user_id):
+    """Get user profile by ID"""
+    user_result = await execute_query(
+        table="users",
+        query_type="select",
+        filters={"id": user_id}
+    )
+    
+    if not user_result or len(user_result) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    return format_user_response(user_result[0])
 
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_user_by_id(user_id: UUID4):

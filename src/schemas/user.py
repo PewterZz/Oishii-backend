@@ -27,6 +27,11 @@ class Purpose(str, Enum):
     TRY_NEW_DISHES = "try out new dishes"
     MAKE_FRIENDS = "make new friends"
 
+class Location(BaseModel):
+    latitude: float = Field(..., description="Latitude coordinate")
+    longitude: float = Field(..., description="Longitude coordinate")
+    formatted_address: str = Field(..., description="Human-readable address")
+
 class UserBase(BaseModel):
     email: EmailStr
     first_name: str = Field(..., min_length=1, max_length=50)
@@ -38,6 +43,7 @@ class UserBase(BaseModel):
     allergies: str = Field(..., max_length=200)
     purpose: Purpose
     home_address: str = Field(..., min_length=5, max_length=200)
+    location: Optional[Location] = None
     is_verified: bool = False
 
 class UserCreate(UserBase):
@@ -53,6 +59,7 @@ class UserUpdate(BaseModel):
     allergies: Optional[str] = None
     purpose: Optional[str] = None
     home_address: Optional[str] = None
+    location: Optional[Location] = None
 
 class UserResponse(BaseModel):
     id: UUID4
@@ -66,6 +73,7 @@ class UserResponse(BaseModel):
     allergies: str
     purpose: Purpose
     home_address: str
+    location: Optional[Location] = None
     profile_picture: Optional[HttpUrl] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
