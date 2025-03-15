@@ -3,9 +3,9 @@ from .endpoints import users, foods, swaps, notifications, ratings
 
 router = APIRouter(prefix="/api/v1")
 
-# Include all routers
+# Include all endpoint routers
 router.include_router(users.router, prefix="/users")
-router.include_router(foods.router)
-router.include_router(swaps.router)
-router.include_router(notifications.router)
-router.include_router(ratings.router) 
+router.include_router(foods.router, prefix="/foods")
+router.include_router(swaps.router, prefix="/swaps")
+router.include_router(notifications.router, prefix="/notifications")
+router.include_router(ratings.router, prefix="/ratings") 

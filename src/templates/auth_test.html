@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Supabase Auth Test</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f5f5;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        .container {
+            background-color: white;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+            padding: 40px;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #4CAF50;
+            margin-bottom: 20px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="email"], input[type="password"], input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 16px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+            background-color: #f8f9fa;
+            border-left: 4px solid #4CAF50;
+            display: none;
+        }
+        .error {
+            border-left-color: #F44336;
+        }
+        .section {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid #eee;
+        }
+        h2 {
+            color: #555;
+            margin-bottom: 15px;
+        }
+        pre {
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .token-display {
+            word-break: break-all;
+            font-size: 12px;
+            background-color: #f0f0f0;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            display: none;
+        }
+        .nav-links {
+            margin-bottom: 20px;
+        }
+        .nav-links a {
+            color: #4CAF50;
+            text-decoration: none;
+            margin-right: 15px;
+        }
+        .nav-links a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav-links">
+            <a href="/api/v1/auth/">Home</a>
+            <a href="/docs" target="_blank">API Docs</a>
+            <a href="/api/v1/auth/debug" target="_blank">Debug</a>
+        </div>
+        
+        <h1>Supabase Auth Test</h1>
+        <p>Use this page to test authentication features without a frontend.</p>
+        
+        <div class="section">
+            <h2>Register</h2>
+            <div class="form-group">
+                <label for="register-email">Email:</label>
+                <input type="email" id="register-email" placeholder="Enter your email">
+            </div>
+            <div class="form-group">
+                <label for="register-password">Password:</label>
+                <input type="password" id="register-password" placeholder="Enter your password">
+            </div>
+            <div class="form-group">
+                <label for="register-name">Name:</label>
+                <input type="text" id="register-name" placeholder="Enter your name">
+            </div>
+            <button onclick="register()">Register</button>
+        </div>
+        
+        <div class="section">
+            <h2>Login</h2>
+            <div class="form-group">
+                <label for="login-email">Email:</label>
+                <input type="email" id="login-email" placeholder="Enter your email">
+            </div>
+            <div class="form-group">
+                <label for="login-password">Password:</label>
+                <input type="password" id="login-password" placeholder="Enter your password">
+            </div>
+            <button onclick="login()">Login</button>
+            <div id="token-display" class="token-display"></div>
+        </div>
+        
+        <div class="section">
+            <h2>Check Verification Status</h2>
+            <div class="form-group">
+                <label for="check-email">Email:</label>
+                <input type="email" id="check-email" placeholder="Enter your email">
+            </div>
+            <button onclick="checkVerification()">Check Status</button>
+        </div>
+        
+        <div class="section">
+            <h2>Resend Confirmation Email</h2>
+            <div class="form-group">
+                <label for="resend-email">Email:</label>
+                <input type="email" id="resend-email" placeholder="Enter your email">
+            </div>
+            <button onclick="resendConfirmation()">Resend Email</button>
+        </div>
+        
+        <div class="section">
+            <h2>Manual Verification (For Testing)</h2>
+            <div class="form-group">
+                <label for="manual-verify-email">Email:</label>
+                <input type="email" id="manual-verify-email" placeholder="Enter your email">
+            </div>
+            <button onclick="manualVerify()">Manually Verify</button>
+        </div>
+        
+        <div class="section">
+            <h2>Debug Auth Settings</h2>
+            <button onclick="debugSettings()">Debug Settings</button>
+        </div>
+        
+        <div id="result" class="result"></div>
+    </div>
+    
+    <script>
+        async function register() {
+            const email = document.getElementById('register-email').value;
+            const password = document.getElementById('register-password').value;
+            const name = document.getElementById('register-name').value;
+            
+            if (!email || !password || !name) {
+                showResult('Please fill in all fields', true);
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/v1/auth/register', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ email, password, name })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult(`Registration successful! Please check your email to verify your account.<br>User ID: ${data.user_id}<br>Redirect URL: ${data.redirect_url}`);
+                } else {
+                    showResult(`Error: ${data.detail}`, true);
+                }
+            } catch (error) {
+                showResult(`Error: ${error.message}`, true);
+            }
+        }
+        
+        async function login() {
+            const email = document.getElementById('login-email').value;
+            const password = document.getElementById('login-password').value;
+            
+            if (!email || !password) {
+                showResult('Please enter email and password', true);
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/v1/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ email, password })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    // Display the token
+                    const tokenDisplay = document.getElementById('token-display');
+                    tokenDisplay.style.display = 'block';
+                    tokenDisplay.innerHTML = `
+                        <strong>Access Token:</strong><br>
+                        ${data.session.access_token}<br><br>
+                        <strong>Refresh Token:</strong><br>
+                        ${data.session.refresh_token}
+                    `;
+                    
+                    showResult(`
+                        Login successful!<br>
+                        User ID: ${data.user.id}<br>
+                        Email: ${data.user.email}<br>
+                        Verified: ${data.user.is_verified ? 'Yes' : 'No'}<br><br>
+                        Your access token is displayed below. Use this token in the Authorization header for API requests.
+                    `);
+                } else {
+                    showResult(`Error: ${data.detail}`, true);
+                }
+            } catch (error) {
+                showResult(`Error: ${error.message}`, true);
+            }
+        }
+        
+        async function checkVerification() {
+            const email = document.getElementById('check-email').value;
+            
+            if (!email) {
+                showResult('Please enter an email address', true);
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/v1/auth/check-verification/${email}`);
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult(`Email: ${data.email}<br>Verified: ${data.is_verified ? 'Yes' : 'No'}`);
+                } else {
+                    showResult(`Error: ${data.detail}`, true);
+                }
+            } catch (error) {
+                showResult(`Error: ${error.message}`, true);
+            }
+        }
+        
+        async function resendConfirmation() {
+            const email = document.getElementById('resend-email').value;
+            
+            if (!email) {
+                showResult('Please enter an email address', true);
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/v1/auth/resend-confirmation', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ email })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult(`Confirmation email sent to ${email}<br>Redirect URL: ${data.redirect_url}`);
+                } else {
+                    showResult(`Error: ${data.detail}`, true);
+                }
+            } catch (error) {
+                showResult(`Error: ${error.message}`, true);
+            }
+        }
+        
+        async function manualVerify() {
+            const email = document.getElementById('manual-verify-email').value;
+            
+            if (!email) {
+                showResult('Please enter an email address', true);
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/v1/auth/manual-verify/${email}`, {
+                    method: 'POST'
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult(`User ${email} has been manually verified.<br>User ID: ${data.user_id}`);
+                } else {
+                    showResult(`Error: ${data.detail}`, true);
+                }
+            } catch (error) {
+                showResult(`Error: ${error.message}`, true);
+            }
+        }
+        
+        async function debugSettings() {
+            try {
+                const response = await fetch('/api/v1/auth/debug');
+                const data = await response.json();
+                
+                if (response.ok) {
+                    showResult(`
+                        <h3>Auth Settings</h3>
+                        <pre>${JSON.stringify(data, null, 2)}</pre>
+                    `);
+                } else {
+                    showResult(`Error: ${data.error}`, true);
+                }
+            } catch (error) {
+                showResult(`Error: ${error.message}`, true);
+            }
+        }
+        
+        function showResult(message, isError = false) {
+            const resultElement = document.getElementById('result');
+            resultElement.innerHTML = message;
+            resultElement.style.display = 'block';
+            
+            if (isError) {
+                resultElement.classList.add('error');
+            } else {
+                resultElement.classList.remove('error');
+            }
+            
+            // Scroll to the result
+            resultElement.scrollIntoView({ behavior: 'smooth' });
+        }
+    </script>
+</body>
+</html> 

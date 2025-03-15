@@ -12,7 +12,7 @@ import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from pydantic import UUID4
+from pydantic import UUID4, EmailStr
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -32,8 +32,12 @@ EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@oishii.com")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/users/token")
+# Update OAuth2PasswordBearer to include description for Swagger UI
+oauth2_scheme = OAuth2PasswordBearer(
+    tokenUrl="/api/v1/users/login",
+    description="Enter the access token directly (without 'Bearer' prefix)",
+    scheme_name="JWT"
+)
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -42,14 +46,11 @@ def get_password_hash(password):
     return pwd_context.hash(password)
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """Create a JWT access token."""
     to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def generate_verification_code():
     return ''.join(random.choices(string.digits, k=6))
@@ -91,205 +92,128 @@ async def send_verification_email(email: str, code: str):
         print(f"Verification code for {email}: {code}")
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
+    """Get the current authenticated user."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
+        # Print token for debugging (first 10 chars)
+        token_preview = token[:10] + "..." if len(token) > 10 else token
+        print(f"Validating token: {token_preview}")
+        
+        # Decode JWT token
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id: str = payload.get("sub")
-        if user_id is None:
+        if not user_id:
+            print("Token missing 'sub' claim")
             raise credentials_exception
-        token_data = TokenData(user_id=user_id)
-    except JWTError:
-        raise credentials_exception
+            
+        print(f"Token contains user_id: {user_id}")
+    except JWTError as e:
+        print(f"JWT Error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid authentication token: {str(e)}",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     
-    user = await execute_query(
-        table="users",
-        query_type="select",
-        filters={"id": token_data.user_id}
-    )
-    
-    if not user or len(user) == 0:
-        raise credentials_exception
-    
-    return user[0]
+    # Get user from database
+    try:
+        user = await execute_query(
+            table="users",
+            query_type="select",
+            filters={"id": user_id}
+        )
+        
+        if not user or len(user) == 0:
+            print(f"User not found with ID: {user_id}")
+            raise credentials_exception
+        
+        print(f"User authenticated: {user[0].get('email')}")
+        return user[0]
+    except Exception as e:
+        print(f"Database error in get_current_user: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving user: {str(e)}",
+        )
 
 # Routes
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register_user(user: UserCreate, background_tasks: BackgroundTasks):
-    existing_user = await execute_query(
-        table="users",
-        query_type="select",
-        filters={"email": user.email}
-    )
-    
-    if existing_user and len(existing_user) > 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered"
+async def register(user_data: UserCreate):
+    """Register a new user."""
+    try:
+        # Check if user exists
+        existing_user = await execute_query(
+            table="users",
+            query_type="select",
+            filters={"email": user_data.email}
         )
-    
-    valid_domains = ["rmit.edu.au", "student.rmit.edu.au", "unimelb.edu.au", "student.unimelb.edu.au", "monash.edu", "student.monash.edu"]
-    if not any(user.email.endswith(domain) for domain in valid_domains):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Please use a valid Australian university email (RMIT, UniMelb, or Monash)"
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered"
+            )
+        
+        # Hash the password
+        hashed_password = pwd_context.hash(user_data.password)
+        
+        # Sign up with Supabase
+        api_url = os.getenv("API_URL", "http://localhost:8000")
+        redirect_url = f"{api_url}/api/v1/users/callback"
+        
+        auth_response = await sign_up(user_data.email, user_data.password, user_data.dict(exclude={"password"}), redirect_url)
+        
+        if not auth_response:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create user"
+            )
+            
+        # Create user in our database
+        user_data_dict = user_data.dict()
+        user_data_dict.update({
+            "id": auth_response["id"],
+            "email": auth_response["email"],
+            "is_verified": False,
+            "password": hashed_password,  # Add the hashed password
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        })
+        
+        new_user = await execute_query(
+            table="users",
+            query_type="insert",
+            data=user_data_dict
         )
-    
-    code = generate_verification_code()
-    
-    user_data = user.model_dump(exclude={"password"})
-    new_user = await sign_up(user.email, user.password, user_data)
-    
-    if not new_user:
+        
+        if not new_user:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create user in database"
+            )
+        
+        # Remove password from response
+        user_response = new_user[0]
+        if "password" in user_response:
+            del user_response["password"]
+            
+        return user_response
+            
+    except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create user"
+            detail=f"Failed to register user: {str(e)}"
         )
-    
-    expires_at = datetime.now() + timedelta(hours=24)
-    verification_data = {
-        "user_id": new_user["id"],
-        "email": user.email,
-        "code": code,
-        "expires_at": expires_at.isoformat()
-    }
-    
-    await execute_query(
-        table="verification_codes",
-        query_type="insert",
-        data=verification_data
-    )
-    
-    background_tasks.add_task(send_verification_email, user.email, code)
-    
-    return new_user
 
-@router.post("/verify", response_model=UserResponse)
-async def verify_email(verification_data: VerificationRequest):
-    user = await execute_query(
-        table="users",
-        query_type="select",
-        filters={"email": verification_data.email}
-    )
-    
-    if not user or len(user) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    user = user[0]
-    
-    if user["is_verified"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already verified"
-        )
-    
-    verification = await execute_query(
-        table="verification_codes",
-        query_type="select",
-        filters={"email": verification_data.email}
-    )
-    
-    if not verification or len(verification) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Verification code not found"
-        )
-    
-    verification = verification[0]
-    
-    expires_at = datetime.fromisoformat(verification["expires_at"])
-    if datetime.now() > expires_at:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Verification code expired"
-        )
-    
-    if verification["code"] != verification_data.code:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid verification code"
-        )
-    
-    await execute_query(
-        table="users",
-        query_type="update",
-        filters={"id": user["id"]},
-        data={"is_verified": True, "updated_at": datetime.now().isoformat()}
-    )
-    
-    await execute_query(
-        table="verification_codes",
-        query_type="delete",
-        filters={"id": verification["id"]}
-    )
-    
-    updated_user = await execute_query(
-        table="users",
-        query_type="select",
-        filters={"id": user["id"]}
-    )
-    
-    return updated_user[0]
-
-@router.post("/resend-verification", status_code=status.HTTP_200_OK)
-async def resend_verification_code(email: str, background_tasks: BackgroundTasks):
-    user = await execute_query(
-        table="users",
-        query_type="select",
-        filters={"email": email}
-    )
-    
-    if not user or len(user) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    user = user[0]
-    
-    if user["is_verified"]:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already verified"
-        )
-    
-    await execute_query(
-        table="verification_codes",
-        query_type="delete",
-        filters={"email": email}
-    )
-    
-    code = generate_verification_code()
-    
-    expires_at = datetime.now() + timedelta(hours=24)
-    verification_data = {
-        "user_id": user["id"],
-        "email": email,
-        "code": code,
-        "expires_at": expires_at.isoformat()
-    }
-    
-    await execute_query(
-        table="verification_codes",
-        query_type="insert",
-        data=verification_data
-    )
-    
-    background_tasks.add_task(send_verification_email, email, code)
-    
-    return {"message": "Verification code sent"}
-
-@router.post("/token", response_model=Token)
-async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+@router.post("/login", response_model=Token)
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    """Log in a user and return an access token."""
     try:
         # Authenticate with Supabase
-        await sign_in(form_data.username, form_data.password)
+        auth_response = await sign_in(form_data.username, form_data.password)
         
         # Get user from database
         user = await execute_query(
@@ -298,40 +222,342 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             filters={"email": form_data.username}
         )
         
-        if not user or len(user) == 0:
+        if not user:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Incorrect email or password",
-                headers={"WWW-Authenticate": "Bearer"},
+                detail="Invalid credentials"
             )
         
         user = user[0]
         
-        if not user["is_verified"]:
+        # Check if user is verified
+        if not user.get("is_verified"):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Email not verified. Please verify your email first."
+                detail="Please verify your email before logging in"
             )
         
         # Create access token
-        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-        access_token = create_access_token(
-            data={"sub": user["id"]},
-            expires_delta=access_token_expires
-        )
-        
+        access_token = create_access_token(data={"sub": user["id"]})
         return {"access_token": access_token, "token_type": "bearer"}
         
     except Exception as e:
-        print(f"Login error: {e}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Invalid credentials"
+        )
+
+@router.get("/verify")
+async def verify_email(
+    token: str = Query(None),
+    confirmation_token: str = Query(None),
+    email: str = Query(None)
+):
+    """Verify a user's email address."""
+    try:
+        # Get the verification token from either parameter
+        verification_token = token or confirmation_token
+        if not verification_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No verification token provided"
+            )
+        
+        if not email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email parameter is required"
+            )
+        
+        try:
+            # Get user from database using email
+            user = await execute_query(
+                table="users",
+                query_type="select",
+                filters={"email": email}
+            )
+            
+            if not user or len(user) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="User not found"
+                )
+            
+            user = user[0]
+            user_id = user["id"]
+            
+            # Update user verification status
+            updated_user = await execute_query(
+                table="users",
+                query_type="update",
+                filters={"id": user_id},
+                data={"is_verified": True, "updated_at": datetime.now().isoformat()}
+            )
+            
+            if not updated_user:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to update user verification status"
+                )
+            
+            # Return success message with a frontend redirect URL if available
+            frontend_url = os.getenv("FRONTEND_URL")
+            if frontend_url:
+                return {
+                    "message": "Email verified successfully",
+                    "redirect_url": f"{frontend_url}/login"
+                }
+            return {"message": "Email verified successfully"}
+            
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid verification token: {str(e)}"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Verification failed: {str(e)}"
+        )
+
+@router.get("/callback")
+async def auth_callback(
+    token_hash: str = Query(None),
+    type: str = Query(None),
+    email: str = Query(None),
+    next: str = Query(None)
+):
+    """
+    Handle Supabase auth callback for email verification.
+    This endpoint processes the token_hash and type parameters from Supabase.
+    """
+    try:
+        print(f"Auth callback received: token_hash={token_hash}, type={type}, email={email}")
+        
+        if not token_hash or not type:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing required parameters: token_hash and type"
+            )
+        
+        # Verify the token with Supabase
+        try:
+            from ....core.supabase import supabase
+            
+            # Call Supabase's verifyOtp method
+            verify_response = await supabase.auth.verify_otp({
+                "token_hash": token_hash,
+                "type": type
+            })
+            
+            print(f"Verification response: {verify_response}")
+            
+            # Get the user from the response
+            user = verify_response.user
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Failed to verify user - no user in response"
+                )
+            
+            print(f"User from verification: {user.email}")
+            
+            # Update the user's verification status in our database
+            db_user = await execute_query(
+                table="users",
+                query_type="select",
+                filters={"email": user.email}
+            )
+            
+            if not db_user or len(db_user) == 0:
+                # Try with the email parameter if provided
+                if email:
+                    db_user = await execute_query(
+                        table="users",
+                        query_type="select",
+                        filters={"email": email}
+                    )
+                
+                if not db_user or len(db_user) == 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"User not found in database for email: {user.email}"
+                    )
+            
+            db_user = db_user[0]
+            user_id = db_user["id"]
+            
+            print(f"Found user in database: {db_user['email']}")
+            
+            # Update user verification status
+            updated_user = await execute_query(
+                table="users",
+                query_type="update",
+                filters={"id": user_id},
+                data={"is_verified": True, "updated_at": datetime.now().isoformat()}
+            )
+            
+            if not updated_user:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Failed to update user verification status"
+                )
+            
+            print(f"Successfully updated user verification status for {db_user['email']}")
+            
+            # Redirect to frontend if available
+            frontend_url = os.getenv("FRONTEND_URL")
+            if frontend_url:
+                from fastapi.responses import RedirectResponse
+                return RedirectResponse(url=f"{frontend_url}/login?verified=true")
+            
+            return {"message": "Email verified successfully"}
+            
+        except Exception as e:
+            print(f"Error verifying token: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid verification token: {str(e)}"
+            )
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Callback error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Verification failed: {str(e)}"
+        )
+
+@router.get("/dev/token", response_model=Token)
+async def get_dev_token(
+    email: str = Query(None),
+    expires_minutes: int = Query(30, ge=1, le=1440)  # Default 30 min, max 24 hours
+):
+    """
+    Generate a temporary access token for testing.
+    
+    Args:
+        email: Email of an existing user to generate token for (optional)
+        expires_minutes: Token expiration time in minutes (default: 30, max: 1440)
+    
+    Returns:
+        A temporary access token
+    """
+    try:
+        # If email is provided, find that user
+        if email:
+            user = await execute_query(
+                table="users",
+                query_type="select",
+                filters={"email": email}
+            )
+            
+            if not user or len(user) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"User not found with email: {email}"
+                )
+            
+            user = user[0]
+        else:
+            # Find any verified user to use
+            users = await execute_query(
+                table="users",
+                query_type="select",
+                filters={"is_verified": True},
+                limit=1
+            )
+            
+            if not users or len(users) == 0:
+                # If no verified users exist, find any user
+                users = await execute_query(
+                    table="users",
+                    query_type="select",
+                    limit=1
+                )
+                
+                if not users or len(users) == 0:
+                    # Create a dummy user if no users exist
+                    hashed_password = pwd_context.hash("dummy-password")
+                    
+                    # Generate a UUID for the user
+                    import uuid
+                    user_id = str(uuid.uuid4())
+                    
+                    # Create dummy user data
+                    dummy_user_data = {
+                        "id": user_id,
+                        "email": "dummy@example.com",
+                        "password": hashed_password,
+                        "first_name": "Dummy",
+                        "last_name": "User",
+                        "bio": "This is a dummy user created for development purposes.",
+                        "cook_type": "the meal prepper",
+                        "cook_frequency": "3-4 times",
+                        "dietary_requirements": ["none"],
+                        "allergies": "None",
+                        "purpose": "try out new dishes",
+                        "home_address": "123 Test Street, Test City",
+                        "is_verified": True,
+                        "created_at": datetime.now().isoformat(),
+                        "updated_at": datetime.now().isoformat()
+                    }
+                    
+                    # Insert the dummy user into the database
+                    new_user = await execute_query(
+                        table="users",
+                        query_type="insert",
+                        data=dummy_user_data
+                    )
+                    
+                    if not new_user or len(new_user) == 0:
+                        raise HTTPException(
+                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                            detail="Failed to create dummy user"
+                        )
+                    
+                    user = new_user[0]
+                else:
+                    user = users[0]
+            else:
+                user = users[0]
+        
+        # Create access token with specified expiration
+        expires_delta = timedelta(minutes=expires_minutes)
+        access_token = create_access_token(
+            data={"sub": user["id"]},
+            expires_delta=expires_delta
+        )
+        
+        # Log the token generation for audit purposes
+        print(f"TOKEN GENERATED for user {user['email']} (ID: {user['id']})")
+        print(f"Token expires in {expires_minutes} minutes")
+        
+        # Return the token
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "expires_in": expires_minutes * 60,
+            "user_id": user["id"],
+            "email": user["email"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error generating token: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate token: {str(e)}"
         )
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_profile(current_user: dict = Depends(get_current_user)):
+    """Get the current user's profile."""
     return current_user
 
 @router.patch("/me", response_model=UserResponse)
@@ -339,7 +565,8 @@ async def update_current_user_profile(
     user_update: UserUpdate,
     current_user: dict = Depends(get_current_user)
 ):
-    update_data = user_update.model_dump(exclude_unset=True)
+    """Update the current user's profile."""
+    update_data = user_update.dict(exclude_unset=True)
     update_data["updated_at"] = datetime.now().isoformat()
     
     updated_user = await execute_query(
@@ -349,7 +576,7 @@ async def update_current_user_profile(
         data=update_data
     )
     
-    if not updated_user or len(updated_user) == 0:
+    if not updated_user:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to update user"
@@ -358,14 +585,15 @@ async def update_current_user_profile(
     return updated_user[0]
 
 @router.get("/{user_id}", response_model=UserResponse)
-async def get_user_by_id(user_id: UUID4 = Path(...)):
+async def get_user_by_id(user_id: UUID4):
+    """Get a user's public profile by ID."""
     user = await execute_query(
         table="users",
         query_type="select",
         filters={"id": str(user_id)}
     )
     
-    if not user or len(user) == 0:
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
@@ -378,10 +606,18 @@ async def get_users(
     skip: int = Query(0, ge=0),
     limit: int = Query(10, ge=1, le=100)
 ):
+    """Get a list of users."""
     users = await execute_query(
         table="users",
         query_type="select",
         limit=limit
     )
     
-    return users[skip:skip + limit] 
+    return users[skip:skip + limit]
+
+@router.get("/check-auth")
+async def check_auth(current_user: dict = Depends(get_current_user)):
+    """
+    Check if the current user is authenticated.
+    """
+    return {"authenticated": True, "user_id": current_user["id"]} 

@@ -9,14 +9,52 @@ load_dotenv()
 # Supabase configuration
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise ValueError(
         "SUPABASE_URL and SUPABASE_KEY must be set in environment variables"
     )
 
-# Create Supabase client
+# Create Supabase client with default settings
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# Print Supabase configuration for debugging
+print(f"Supabase URL: {SUPABASE_URL}")
+print(f"API URL: {API_URL}")
+print(f"Callback URL: {API_URL}/api/v1/users/callback")
+
+# Helper function to verify tokens
+async def verify_token(token: str, type: str = "signup") -> Dict[str, Any]:
+    """
+    Verify a token with Supabase.
+    
+    Args:
+        token: The token to verify
+        type: The type of verification (signup, recovery, invite)
+        
+    Returns:
+        The verification response
+    """
+    try:
+        print(f"Verifying token of type {type}")
+        print(f"Token: {token[:10]}... (truncated)")
+        
+        verify_params = {
+            "token": token,
+            "type": type
+        }
+        
+        response = supabase.auth.verify_otp(verify_params)
+        print(f"Verification response type: {type(response)}")
+        print(f"Verification response attributes: {dir(response)}")
+        
+        return response
+    except Exception as e:
+        print(f"Error verifying token: {str(e)}")
+        print(f"Error type: {type(e)}")
+        print(f"Error details: {repr(e)}")
+        raise e
 
 # Helper functions for database operations
 async def execute_query(
@@ -182,7 +220,7 @@ async def execute_query(
         raise e
 
 # Auth functions
-async def sign_up(email: str, password: str, user_data: Dict[str, Any]):
+async def sign_up(email: str, password: str, user_data: Dict[str, Any], redirect_url: Optional[str] = None):
     """
     Sign up a new user.
     
@@ -190,35 +228,64 @@ async def sign_up(email: str, password: str, user_data: Dict[str, Any]):
         email: The user's email
         password: The user's password
         user_data: Additional user data
+        redirect_url: URL to redirect to after email confirmation
         
     Returns:
         The new user
     """
     try:
+        # Ensure we have a redirect URL for email confirmation
+        if not redirect_url:
+            api_url = os.getenv("API_URL", "http://localhost:8000").rstrip('/')
+            redirect_url = f"{api_url}/api/v1/users/callback"
+        
+        # Make sure the redirect URL doesn't have a trailing slash
+        redirect_url = redirect_url.rstrip('/')
+            
+        print(f"Signing up user with redirect URL: {redirect_url}")
+        
         # Sign up the user with Supabase Auth
         auth_response = supabase.auth.sign_up({
             "email": email,
-            "password": password
+            "password": password,
+            "options": {
+                "data": user_data,
+                "email_redirect_to": redirect_url,
+                # We don't need to add additional email template data
+                # Supabase will automatically include the necessary parameters
+            }
         })
         
-        # Get the user ID from the auth response
-        user_id = auth_response.user.id
-   
-        user_data["id"] = user_id
-        user_data["password"] = password  # Add password to user data
+        print(f"Auth response type: {type(auth_response)}")
+        print(f"Auth response dir: {dir(auth_response)}")
+        print(f"Auth response dict: {auth_response.__dict__}")
         
-        # Insert the user data into the users table
-        user_response = await execute_query(
-            table="users",
-            query_type="insert",
-            data=user_data
-        )
+        # Get the user data from the auth response
+        user = auth_response.user
+        print(f"User type: {type(user)}")
+        print(f"User dir: {dir(user)}")
+        print(f"User dict: {user.__dict__}")
         
-        return user_response[0] if user_response else None
+        if not user:
+            print("Could not extract user data from auth response")
+            raise ValueError("Failed to create user in Supabase Auth")
+        
+        # Convert user data to dictionary
+        user_dict = {
+            "id": user.id,
+            "email": user.email,
+            "is_verified": False
+        }
+        
+        print(f"Created user dict: {user_dict}")
+        
+        return user_dict
         
     except Exception as e:
         # Log the error
         print(f"Error signing up user: {e}")
+        print(f"Error type: {type(e)}")
+        print(f"Error details: {repr(e)}")
         raise e
 
 async def sign_in(email: str, password: str):
@@ -233,16 +300,24 @@ async def sign_in(email: str, password: str):
         The user's session
     """
     try:
+        print(f"Signing in user with email: {email}")
+        
+        # Sign in with password
         response = supabase.auth.sign_in_with_password({
             "email": email,
             "password": password
         })
         
+        print(f"Sign-in response type: {type(response)}")
+        print(f"Sign-in response attributes: {dir(response)}")
+        
         return response
         
     except Exception as e:
         # Log the error
-        print(f"Error signing in user: {e}")
+        print(f"Error signing in user: {str(e)}")
+        print(f"Error type: {type(e)}")
+        print(f"Error details: {repr(e)}")
         raise e
 
 async def sign_out(jwt: str):

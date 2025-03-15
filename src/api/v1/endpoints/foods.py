@@ -35,6 +35,10 @@ async def create_food(
         "updated_at": now
     }
     
+    # Ensure pickup_times is included
+    if food_data.get("pickup_times") is None:
+        food_data["pickup_times"] = []
+    
     new_food = await execute_query(
         table="foods",
         query_type="insert",

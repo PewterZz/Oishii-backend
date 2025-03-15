@@ -36,6 +36,20 @@ class SwapResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+class SwapDetailResponse(BaseModel):
+    id: UUID4
+    requester_id: UUID4
+    provider_id: UUID4
+    requester_food_id: UUID4
+    provider_food_id: UUID4
+    message: Optional[str] = None
+    response_message: Optional[str] = None
+    status: SwapStatus
+    created_at: datetime
+    updated_at: datetime
+    requester_food: dict
+    provider_food: dict
+
 @router.post("/", response_model=SwapResponse, status_code=status.HTTP_201_CREATED)
 async def create_swap_request(
     swap: SwapCreate,
@@ -43,6 +57,9 @@ async def create_swap_request(
 ):
     """
     Create a new swap request.
+    
+    This endpoint allows a user to request a food swap with another user.
+    The requester must own the requester_food_id and the provider must own the provider_food_id.
     """
     # Verify user is verified
     if not current_user.get("is_verified", False):
@@ -141,6 +158,24 @@ async def create_swap_request(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create swap request"
         )
+    
+    # Create notification for the provider
+    notification_data = {
+        "user_id": str(swap.provider_id),
+        "title": "New Swap Request",
+        "message": f"You have a new swap request from {current_user.get('first_name', 'a user')}",
+        "type": "swap_request",
+        "is_read": False,
+        "data": {"swap_id": new_swap[0]["id"]},
+        "created_at": now,
+        "updated_at": now
+    }
+    
+    await execute_query(
+        table="notifications",
+        query_type="insert",
+        data=notification_data
+    )
     
     return new_swap[0]
 
@@ -317,4 +352,71 @@ async def update_swap_status(
             data={"is_available": False, "updated_at": datetime.now().isoformat()}
         )
     
-    return updated_swap[0] 
+    return updated_swap[0]
+
+@router.get("/{swap_id}/detail", response_model=SwapDetailResponse)
+async def get_swap_detail(
+    swap_id: UUID4 = Path(...),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get detailed information about a specific swap, including the food details.
+    """
+    user_id = current_user["id"]
+    
+    # Get swap from database
+    swap = await execute_query(
+        table="swaps",
+        query_type="select",
+        filters={"id": str(swap_id)}
+    )
+    
+    if not swap or len(swap) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Swap not found"
+        )
+    
+    swap = swap[0]
+    
+    # Verify the user is part of this swap
+    if swap["requester_id"] != user_id and swap["provider_id"] != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have permission to view this swap"
+        )
+    
+    # Get requester food details
+    requester_food = await execute_query(
+        table="foods",
+        query_type="select",
+        filters={"id": swap["requester_food_id"]}
+    )
+    
+    if not requester_food or len(requester_food) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Requester food not found"
+        )
+    
+    # Get provider food details
+    provider_food = await execute_query(
+        table="foods",
+        query_type="select",
+        filters={"id": swap["provider_food_id"]}
+    )
+    
+    if not provider_food or len(provider_food) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Provider food not found"
+        )
+    
+    # Add food details to swap
+    swap_detail = {
+        **swap,
+        "requester_food": requester_food[0],
+        "provider_food": provider_food[0]
+    }
+    
+    return swap_detail 
