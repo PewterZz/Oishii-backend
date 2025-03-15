@@ -1,11 +1,11 @@
-from fastapi import APIRouter, HTTPException, status, Depends, Path, Query, BackgroundTasks
+from fastapi import APIRouter, HTTPException, status, Depends, Path, Query, BackgroundTasks, Request, Response
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timedelta
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from ....schemas.user import UserCreate, UserResponse, UserUpdate, Token, TokenData, VerificationRequest
-from ....core.supabase import execute_query, sign_up, sign_in, get_user
+from ....core.supabase import execute_query, sign_up, sign_in, get_user, get_supabase_client, execute_raw_sql, check_user_exists
 import random
 import string
 import os
@@ -14,6 +14,11 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from pydantic import UUID4, EmailStr
 from dotenv import load_dotenv
+import httpx
+import json
+import psycopg2
+import psycopg2.extras
+from urllib.parse import urlparse
 
 # Load environment variables
 load_dotenv()
@@ -111,6 +116,22 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
             raise credentials_exception
             
         print(f"Token contains user_id: {user_id}")
+        
+        # Try to get user from Supabase auth first
+        try:
+            from ....core.supabase import get_supabase_client
+            supabase_client = get_supabase_client()
+            
+            # Try to get user from Supabase auth
+            try:
+                auth_user = supabase_client.auth.admin.get_user_by_id(user_id)
+                print(f"User found in Supabase auth: {auth_user.user.id if auth_user and auth_user.user else 'None'}")
+            except Exception as auth_error:
+                print(f"Error getting user from Supabase auth: {str(auth_error)}")
+                print(f"Error type: {type(auth_error)}")
+                # Continue to database check even if Supabase auth check fails
+        except Exception as client_error:
+            print(f"Error getting Supabase client: {str(client_error)}")
     except JWTError as e:
         print(f"JWT Error: {str(e)}")
         raise HTTPException(
@@ -121,20 +142,42 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
     
     # Get user from database
     try:
+        print(f"Querying database for user with ID: {user_id}")
         user = await execute_query(
             table="users",
             query_type="select",
             filters={"id": user_id}
         )
         
+        print(f"Database query result: {user}")
+        
         if not user or len(user) == 0:
-            print(f"User not found with ID: {user_id}")
+            print(f"User not found in database with ID: {user_id}")
+            
+            # Try to check if user exists in auth.users table directly
+            try:
+                check_query = f"""
+                SELECT id FROM auth.users WHERE id = '{user_id}';
+                """
+                check_result = await execute_raw_sql(check_query)
+                print(f"Auth users check result: {check_result}")
+                
+                if check_result and check_result.get("data") and len(check_result.get("data", [])) > 0:
+                    print(f"User exists in auth.users table but not in our database table")
+                    # This suggests a sync issue between our database and auth.users
+                else:
+                    print(f"User not found in auth.users table either")
+            except Exception as check_error:
+                print(f"Error checking auth.users table: {str(check_error)}")
+            
             raise credentials_exception
         
         print(f"User authenticated: {user[0].get('email')}")
         return user[0]
     except Exception as e:
         print(f"Database error in get_current_user: {str(e)}")
+        print(f"Error type: {type(e)}")
+        print(f"Error details: {repr(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving user: {str(e)}",
@@ -566,23 +609,210 @@ async def update_current_user_profile(
     current_user: dict = Depends(get_current_user)
 ):
     """Update the current user's profile."""
+    # Log the current user information for debugging
+    print(f"Current user ID: {current_user.get('id')}")
+    print(f"Current user data: {current_user}")
+    
+    # First, check if the user exists in Supabase auth
+    from ....core.supabase import check_user_exists
+    
+    user_exists = await check_user_exists(current_user["id"])
+    if not user_exists:
+        print(f"User not found in Supabase auth, but exists in our database: {current_user['id']}")
+        
+        # This is a critical error - the user exists in our database but not in Supabase auth
+        # We need to handle this case specially
+        
+        # Option 1: Try to recreate the user in Supabase auth (not implemented here)
+        # Option 2: Return a specific error message to the client
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User exists in database but not in authentication system. Please contact support."
+        )
+    
+    # Convert Pydantic model to dict and exclude unset values
     update_data = user_update.dict(exclude_unset=True)
     update_data["updated_at"] = datetime.now().isoformat()
     
-    updated_user = await execute_query(
-        table="users",
-        query_type="update",
-        filters={"id": current_user["id"]},
-        data=update_data
-    )
+    # Log the update data for debugging
+    print(f"Updating user profile with data: {update_data}")
     
-    if not updated_user:
+    # Create a clean copy of the data for serialization
+    clean_data = {}
+    
+    # Ensure all values are JSON serializable
+    for key, value in list(update_data.items()):
+        # Skip null values
+        if value is None:
+            clean_data[key] = None
+            continue
+            
+        # Special handling for profile_picture (HttpUrl)
+        if key == "profile_picture":
+            clean_data[key] = str(value)
+            continue
+            
+        # Handle URL objects specifically
+        if str(type(value)).find('Url') != -1 or str(type(value)).find('URL') != -1:
+            clean_data[key] = str(value)
+        # Handle Enum values
+        elif hasattr(value, 'value') and isinstance(value.value, (str, int, float, bool)):
+            clean_data[key] = value.value
+        # Handle other custom objects
+        elif hasattr(value, '__dict__'):
+            clean_data[key] = str(value)
+        # Handle lists of objects
+        elif isinstance(value, list):
+            serialized_list = []
+            for item in value:
+                if item is None:
+                    serialized_list.append(None)
+                elif hasattr(item, 'value') and isinstance(item.value, (str, int, float, bool)):
+                    serialized_list.append(item.value)
+                elif str(type(item)).find('Url') != -1 or str(type(item)).find('URL') != -1:
+                    serialized_list.append(str(item))
+                elif hasattr(item, '__dict__'):
+                    serialized_list.append(str(item))
+                else:
+                    serialized_list.append(item)
+            clean_data[key] = serialized_list
+        else:
+            clean_data[key] = value
+    
+    # Verify JSON serialization
+    try:
+        json_str = json.dumps(clean_data)
+        print(f"JSON serialization successful: {json_str[:100]}...")
+    except TypeError as json_error:
+        print(f"JSON serialization error: {json_error}")
+        # This is a serious error, we need to fix it before proceeding
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to update user"
+            detail=f"Data serialization error: {str(json_error)}"
         )
     
-    return updated_user[0]
+    # Get the Supabase client once for all operations
+    from ....core.supabase import get_supabase_client
+    supabase_client = get_supabase_client()
+    
+    # Try multiple approaches to update the user profile
+    # 1. First try: Direct Supabase admin API
+    try:
+        print(f"Attempting to update user with ID: {current_user['id']} using admin API")
+        response = supabase_client.auth.admin.update_user_by_id(
+            current_user["id"],
+            {"user_metadata": clean_data}
+        )
+        
+        print(f"Supabase update response: {response}")
+        
+        if response and response.user:
+            print("User profile updated successfully using admin API")
+            # Merge the updated data with the current user data
+            updated_user = current_user.copy()
+            updated_user.update(clean_data)
+            return {"user": updated_user}
+        else:
+            print("Admin API update returned no user data, trying next approach")
+    except Exception as admin_error:
+        print(f"Admin API update error: {str(admin_error)}")
+        print(f"Error type: {type(admin_error)}")
+        print(f"Error details: {repr(admin_error)}")
+    
+    # 2. Second try: Raw SQL update
+    try:
+        print("Attempting to update user profile using raw SQL")
+        query = f"""
+        UPDATE auth.users
+        SET raw_user_meta_data = raw_user_meta_data || '{json.dumps(clean_data)}'::jsonb
+        WHERE id = '{current_user["id"]}'
+        RETURNING *;
+        """
+        
+        print(f"Executing SQL query: {query}")
+        result = await execute_raw_sql(query)
+        print(f"SQL query result: {result}")
+        
+        if result and result.get("data") and len(result.get("data", [])) > 0:
+            print("User profile updated successfully using raw SQL")
+            return {"user": current_user | clean_data}
+        else:
+            print("SQL update returned no data, trying next approach")
+    except Exception as sql_error:
+        print(f"SQL update error: {str(sql_error)}")
+        print(f"Error type: {type(sql_error)}")
+        print(f"Error details: {repr(sql_error)}")
+    
+    # 3. Third try: REST API with minimal data
+    try:
+        print("Attempting minimal update with only simple data types")
+        
+        # Create a minimal payload with only simple data types
+        minimal_data = {
+            "updated_at": update_data.get("updated_at")
+        }
+        
+        # Add other simple data types
+        for key, value in clean_data.items():
+            if isinstance(value, (str, int, float, bool, type(None))):
+                minimal_data[key] = value
+        
+        print(f"Minimal update data: {minimal_data}")
+        
+        # Try direct REST API call
+        try:
+            import httpx
+            
+            # Get the Supabase URL and key
+            from ....core.supabase import SUPABASE_URL, SUPABASE_KEY
+            
+            # Construct the URL for the admin user update endpoint
+            url = f"{SUPABASE_URL}/auth/v1/admin/users/{current_user['id']}"
+            
+            # Set up the headers
+            headers = {
+                "apikey": SUPABASE_KEY,
+                "Authorization": f"Bearer {SUPABASE_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            # Prepare the payload
+            payload = {
+                "user_metadata": minimal_data
+            }
+            
+            # Make the request
+            print(f"Making REST API request to: {url}")
+            response = httpx.put(url, json=payload, headers=headers)
+            
+            # Check if the request was successful
+            if response.status_code == 200:
+                print(f"REST API update successful: {response.json()}")
+                # Merge the updated data with the current user data
+                updated_user = current_user.copy()
+                updated_user.update(minimal_data)
+                return {"user": updated_user}
+            else:
+                print(f"REST API update failed with status code: {response.status_code}")
+                print(f"Response: {response.text}")
+                raise Exception(f"REST API update failed: {response.text}")
+                
+        except Exception as rest_error:
+            print(f"REST API update error: {str(rest_error)}")
+            print(f"Error type: {type(rest_error)}")
+            print(f"Error details: {repr(rest_error)}")
+            raise rest_error
+            
+    except Exception as minimal_error:
+        print(f"Minimal update error: {str(minimal_error)}")
+        print(f"Error type: {type(minimal_error)}")
+        print(f"Error details: {repr(minimal_error)}")
+        
+        # All approaches failed
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update user profile after multiple attempts: {str(minimal_error)}"
+        )
 
 @router.get("/{user_id}", response_model=UserResponse)
 async def get_user_by_id(user_id: UUID4):

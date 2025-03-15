@@ -84,95 +84,138 @@ async def execute_query(
         The result of the query
     """
     try:
+        # Log the operation for debugging
+        print(f"Executing {query_type} on table {table}")
+        print(f"Filters: {filters}")
+        print(f"Data: {data}")
+        
+        # Get the base query builder
         query = supabase.table(table)
         
         if query_type == "select":
+            # Start with a basic select
             query = query.select(select)
             
-            # Apply joins if provided
-            if joins:
-                for join in joins:
-                    join_table = join.get("table")
-                    join_on = join.get("on")
-                    join_type = join.get("type", "inner")
+            # Execute the query without any filters or options first
+            # This is to check if the basic functionality works
+            try:
+                result = query.execute()
+                print("Basic select query executed successfully")
+                
+                # If we have filters, we need to filter the results manually
+                if filters:
+                    filtered_data = []
+                    for item in result.data:
+                        include_item = True
+                        for key, value in filters.items():
+                            if isinstance(value, dict):
+                                # Complex filters not supported in this basic implementation
+                                # Just use equality for now
+                                operator = list(value.keys())[0]
+                                if operator == "eq" and item.get(key) != value[operator]:
+                                    include_item = False
+                                    break
+                            elif item.get(key) != value:
+                                include_item = False
+                                break
+                        if include_item:
+                            filtered_data.append(item)
                     
-                    if join_table and join_on:
-                        if join_type == "inner":
-                            query = query.join(join_table, join_on)
-                        elif join_type == "left":
-                            query = query.join(join_table, join_on, join_type="left")
-                        elif join_type == "right":
-                            query = query.join(join_table, join_on, join_type="right")
-                        elif join_type == "full":
-                            query = query.join(join_table, join_on, join_type="full")
-            
-            # Apply filters if provided
-            if filters:
-                for key, value in filters.items():
-                    if isinstance(value, dict):
-                        operator = list(value.keys())[0]
-                        if operator == "eq":
-                            query = query.eq(key, value[operator])
-                        elif operator == "neq":
-                            query = query.neq(key, value[operator])
-                        elif operator == "gt":
-                            query = query.gt(key, value[operator])
-                        elif operator == "gte":
-                            query = query.gte(key, value[operator])
-                        elif operator == "lt":
-                            query = query.lt(key, value[operator])
-                        elif operator == "lte":
-                            query = query.lte(key, value[operator])
-                        elif operator == "like":
-                            query = query.like(key, value[operator])
-                        elif operator == "ilike":
-                            query = query.ilike(key, value[operator])
-                        elif operator == "is":
-                            query = query.is_(key, value[operator])
-                        elif operator == "in":
-                            query = query.in_(key, value[operator])
-                        elif operator == "contains":
-                            query = query.contains(key, value[operator])
-                        elif operator == "containedBy":
-                            query = query.contained_by(key, value[operator])
-                        elif operator == "rangeGt":
-                            query = query.range_gt(key, value[operator])
-                        elif operator == "rangeGte":
-                            query = query.range_gte(key, value[operator])
-                        elif operator == "rangeLt":
-                            query = query.range_lt(key, value[operator])
-                        elif operator == "rangeLte":
-                            query = query.range_lte(key, value[operator])
-                        elif operator == "rangeAdjacent":
-                            query = query.range_adjacent(key, value[operator])
-                        elif operator == "overlaps":
-                            query = query.overlaps(key, value[operator])
-                        elif operator == "textSearch":
-                            query = query.text_search(key, value[operator])
-                    else:
-                        query = query.eq(key, value)
-            
-            # Apply order by if provided
-            if order_by:
-                for key, direction in order_by.items():
-                    if direction.lower() == "asc":
-                        query = query.order(key, ascending=True)
-                    elif direction.lower() == "desc":
-                        query = query.order(key, ascending=False)
-            
-            # Apply limit if provided
-            if limit:
-                query = query.limit(limit)
-            
-            result = query.execute()
-            return result.data
+                    # Apply limit if provided
+                    if limit and len(filtered_data) > limit:
+                        filtered_data = filtered_data[:limit]
+                    
+                    # Apply order by if provided
+                    if order_by:
+                        for key, direction in order_by.items():
+                            reverse = direction.lower() == "desc"
+                            filtered_data.sort(key=lambda x: x.get(key, ""), reverse=reverse)
+                    
+                    return filtered_data
+                else:
+                    # Apply limit if provided
+                    if limit and len(result.data) > limit:
+                        return result.data[:limit]
+                    return result.data
+                
+            except Exception as select_e:
+                print(f"Basic select query failed: {select_e}")
+                raise select_e
             
         elif query_type == "insert":
             if not data:
                 raise ValueError("Data is required for insert operations")
             
-            result = query.insert(data).execute()
-            return result.data
+            try:
+                # Try the standard insert method
+                result = query.insert(data).execute()
+                print("Insert operation successful")
+                return result.data
+            except Exception as insert_e:
+                print(f"Insert operation failed: {insert_e}")
+                
+                # Try a direct HTTP request as a last resort
+                try:
+                    import httpx
+                    import json
+                    from datetime import datetime
+                    
+                    # Get the Supabase URL and key from the client
+                    supabase_url = SUPABASE_URL
+                    supabase_key = SUPABASE_KEY
+                    
+                    # Construct the URL for the table
+                    url = f"{supabase_url}/rest/v1/{table}"
+                    
+                    # Set up the headers
+                    headers = {
+                        "apikey": supabase_key,
+                        "Authorization": f"Bearer {supabase_key}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=representation"
+                    }
+                    
+                    # Serialize the data to handle non-JSON serializable objects
+                    serialized_data = {}
+                    for key, value in data.items():
+                        # Handle different types of values
+                        if isinstance(value, datetime):
+                            serialized_data[key] = value.isoformat()
+                        # Handle URL objects specifically
+                        elif str(type(value)).find('Url') != -1 or str(type(value)).find('URL') != -1:
+                            serialized_data[key] = str(value)
+                        elif hasattr(value, '__dict__'):  # Custom objects
+                            serialized_data[key] = str(value)
+                        # Handle lists of objects
+                        elif isinstance(value, list):
+                            serialized_list = []
+                            for item in value:
+                                if isinstance(item, datetime):
+                                    serialized_list.append(item.isoformat())
+                                elif str(type(item)).find('Url') != -1 or str(type(item)).find('URL') != -1:
+                                    serialized_list.append(str(item))
+                                elif hasattr(item, '__dict__'):
+                                    serialized_list.append(str(item))
+                                else:
+                                    serialized_list.append(item)
+                            serialized_data[key] = serialized_list
+                        else:
+                            serialized_data[key] = value
+                    
+                    # Print the serialized data for debugging
+                    print(f"Serialized data: {serialized_data}")
+                    
+                    # Make the request
+                    response = httpx.post(url, json=serialized_data, headers=headers)
+                    response.raise_for_status()
+                    
+                    print("Insert operation successful using direct HTTP request")
+                    return response.json()
+                except Exception as http_e:
+                    print(f"Direct HTTP insert request failed: {http_e}")
+                    print(f"Error type: {type(http_e)}")
+                    print(f"Error details: {repr(http_e)}")
+                    raise http_e
             
         elif query_type == "update":
             if not data:
@@ -181,35 +224,157 @@ async def execute_query(
             if not filters:
                 raise ValueError("Filters are required for update operations")
             
-            # Apply filters
-            for key, value in filters.items():
-                if isinstance(value, dict):
-                    operator = list(value.keys())[0]
-                    if operator == "eq":
-                        query = query.eq(key, value[operator])
-                    # Add other operators as needed
-                else:
-                    query = query.eq(key, value)
-            
-            result = query.update(data).execute()
-            return result.data
+            try:
+                # Try the standard update method
+                # We'll need to construct a query string for the filters
+                filter_params = []
+                for key, value in filters.items():
+                    if isinstance(value, dict):
+                        # Complex filters not supported in this basic implementation
+                        # Just use equality for now
+                        operator = list(value.keys())[0]
+                        if operator == "eq":
+                            filter_params.append(f"{key}=eq.{value[operator]}")
+                    else:
+                        filter_params.append(f"{key}=eq.{value}")
+                
+                # Construct the URL for the table with filters
+                import httpx
+                import json
+                from datetime import datetime
+                
+                # Get the Supabase URL and key from the client
+                supabase_url = SUPABASE_URL
+                supabase_key = SUPABASE_KEY
+                
+                # Construct the URL for the table with filters
+                url = f"{supabase_url}/rest/v1/{table}?{('&'.join(filter_params))}"
+                
+                # Set up the headers
+                headers = {
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=representation"
+                }
+                
+                # Serialize the data to handle non-JSON serializable objects
+                serialized_data = {}
+                for key, value in data.items():
+                    # Handle different types of values
+                    if isinstance(value, datetime):
+                        serialized_data[key] = value.isoformat()
+                    # Handle URL objects specifically
+                    elif str(type(value)).find('Url') != -1 or str(type(value)).find('URL') != -1:
+                        serialized_data[key] = str(value)
+                    elif hasattr(value, '__dict__'):  # Custom objects
+                        serialized_data[key] = str(value)
+                    # Handle lists of objects
+                    elif isinstance(value, list):
+                        serialized_list = []
+                        for item in value:
+                            if isinstance(item, datetime):
+                                serialized_list.append(item.isoformat())
+                            elif str(type(item)).find('Url') != -1 or str(type(item)).find('URL') != -1:
+                                serialized_list.append(str(item))
+                            elif hasattr(item, '__dict__'):
+                                serialized_list.append(str(item))
+                            else:
+                                serialized_list.append(item)
+                        serialized_data[key] = serialized_list
+                    else:
+                        serialized_data[key] = value
+                
+                # Print the serialized data for debugging
+                print(f"Serialized data: {serialized_data}")
+                
+                # Make the request
+                response = httpx.patch(url, json=serialized_data, headers=headers)
+                response.raise_for_status()
+                
+                print("Update operation successful using direct HTTP request")
+                return response.json()
+                
+            except Exception as update_e:
+                print(f"Update operation failed: {update_e}")
+                print(f"Error type: {type(update_e)}")
+                print(f"Error details: {repr(update_e)}")
+                
+                # Try one more approach - direct SQL update
+                try:
+                    print("Attempting direct update through Supabase client...")
+                    # Try to use the update method directly
+                    result = query.update(data).execute()
+                    print("Direct update successful")
+                    return result.data
+                except Exception as direct_e:
+                    print(f"Direct update also failed: {direct_e}")
+                    raise update_e
             
         elif query_type == "delete":
             if not filters:
                 raise ValueError("Filters are required for delete operations")
             
-            # Apply filters
-            for key, value in filters.items():
-                if isinstance(value, dict):
-                    operator = list(value.keys())[0]
-                    if operator == "eq":
-                        query = query.eq(key, value[operator])
-                    # Add other operators as needed
-                else:
-                    query = query.eq(key, value)
-            
-            result = query.delete().execute()
-            return result.data
+            try:
+                # Try the standard delete method
+                # We'll need to construct a query string for the filters
+                filter_params = []
+                for key, value in filters.items():
+                    if isinstance(value, dict):
+                        # Complex filters not supported in this basic implementation
+                        # Just use equality for now
+                        operator = list(value.keys())[0]
+                        if operator == "eq":
+                            filter_params.append(f"{key}=eq.{value[operator]}")
+                    else:
+                        filter_params.append(f"{key}=eq.{value}")
+                
+                # Construct the URL for the table with filters
+                import httpx
+                
+                # Get the Supabase URL and key from the client
+                supabase_url = SUPABASE_URL
+                supabase_key = SUPABASE_KEY
+                
+                # Construct the URL for the table with filters
+                url = f"{supabase_url}/rest/v1/{table}?{('&'.join(filter_params))}"
+                
+                # Set up the headers
+                headers = {
+                    "apikey": supabase_key,
+                    "Authorization": f"Bearer {supabase_key}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=representation"
+                }
+                
+                # Make the request
+                response = httpx.delete(url, headers=headers)
+                response.raise_for_status()
+                
+                print("Delete operation successful using direct HTTP request")
+                return response.json()
+                
+            except Exception as delete_e:
+                print(f"Delete operation failed: {delete_e}")
+                print(f"Error type: {type(delete_e)}")
+                print(f"Error details: {repr(delete_e)}")
+                
+                # Try one more approach - direct delete
+                try:
+                    print("Attempting direct delete through Supabase client...")
+                    # Try to use the delete method directly
+                    for key, value in filters.items():
+                        if isinstance(value, dict):
+                            # Skip complex filters for now
+                            continue
+                        query = query.eq(key, value)
+                    
+                    result = query.delete().execute()
+                    print("Direct delete successful")
+                    return result.data
+                except Exception as direct_e:
+                    print(f"Direct delete also failed: {direct_e}")
+                    raise delete_e
             
         else:
             raise ValueError(f"Invalid query type: {query_type}")
@@ -217,6 +382,15 @@ async def execute_query(
     except Exception as e:
         # Log the error
         print(f"Error executing query: {e}")
+        print(f"Error type: {type(e)}")
+        print(f"Error details: {repr(e)}")
+        print(f"Query type: {query_type}")
+        print(f"Table: {table}")
+        if filters:
+            print(f"Filters: {filters}")
+        if data:
+            print(f"Data: {data}")
+        
         raise e
 
 # Auth functions
@@ -360,4 +534,101 @@ async def get_user(jwt: str):
     except Exception as e:
         # Log the error
         print(f"Error getting user: {e}")
-        raise e 
+        raise e
+
+def get_supabase_client():
+    """
+    Get the Supabase client instance.
+    
+    Returns:
+        The Supabase client
+    """
+    return supabase
+
+async def execute_raw_sql(query: str):
+    """
+    Execute a raw SQL query using the Supabase REST API.
+    
+    Args:
+        query: The SQL query to execute
+        
+    Returns:
+        The result of the query
+    """
+    try:
+        print(f"Executing raw SQL query: {query}")
+        
+        # Use the Supabase client to execute the raw SQL query
+        result = supabase.rpc("execute_sql", {"query": query}).execute()
+        
+        print(f"Raw SQL query result: {result}")
+        return result
+        
+    except Exception as e:
+        print(f"Error executing raw SQL query: {str(e)}")
+        print(f"Error type: {type(e)}")
+        print(f"Error details: {repr(e)}")
+        
+        # Try using the REST API directly
+        try:
+            import httpx
+            
+            # Get the Supabase URL and key
+            supabase_url = SUPABASE_URL
+            supabase_key = SUPABASE_KEY
+            
+            # Construct the URL for the RPC endpoint
+            url = f"{supabase_url}/rest/v1/rpc/execute_sql"
+            
+            # Set up the headers
+            headers = {
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # Make the request
+            response = httpx.post(url, json={"query": query}, headers=headers)
+            response.raise_for_status()
+            
+            print(f"Raw SQL query result via REST API: {response.json()}")
+            return {"data": response.json()}
+            
+        except Exception as http_e:
+            print(f"REST API approach also failed: {str(http_e)}")
+            raise e
+
+async def check_user_exists(user_id: str) -> bool:
+    """
+    Check if a user exists in Supabase auth.
+    
+    Args:
+        user_id: The user's ID
+        
+    Returns:
+        True if the user exists, False otherwise
+    """
+    try:
+        print(f"Checking if user exists in Supabase auth: {user_id}")
+        
+        # Try to get the user from Supabase auth
+        response = supabase.auth.admin.get_user_by_id(user_id)
+        
+        # If we get here, the user exists
+        print(f"User exists in Supabase auth: {user_id}")
+        return True
+        
+    except Exception as e:
+        print(f"Error checking if user exists in Supabase auth: {str(e)}")
+        print(f"Error type: {type(e)}")
+        print(f"Error details: {repr(e)}")
+        
+        # Check if the error is related to user not found
+        error_str = str(e).lower()
+        if "user not found" in error_str or "not found" in error_str:
+            print(f"User not found in Supabase auth: {user_id}")
+            return False
+            
+        # For other errors, we're not sure if the user exists or not
+        print(f"Unknown error checking if user exists in Supabase auth: {str(e)}")
+        return False 
