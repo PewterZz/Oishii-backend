@@ -23,6 +23,7 @@ from ....core.datastax import (
 from ....services.langflow_service import get_ai_food_recommendations
 from ....services.dr_foodlove_service import get_dr_foodlove_recommendations
 from ...v1.endpoints.users import get_current_user
+from ....core.supabase import execute_query
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -130,12 +131,63 @@ async def get_ai_recommendations(
                 "cuisine_preferences": current_user.get("cuisine_preferences", [])
             }
         
+        # Fetch available foods from the database to provide context to the AI
+        available_foods = []
+        try:
+            # Get a sample of available foods from the database
+            foods_result = await execute_query(
+                table="foods",
+                query_type="select",
+                filters={"is_available": True},
+                limit=50  # Limit to 50 foods to avoid token limits
+            )
+            
+            if foods_result and len(foods_result) > 0:
+                # Extract relevant information from each food
+                available_foods = [
+                    {
+                        "name": food.get("title", ""),
+                        "description": food.get("description", ""),
+                        "category": food.get("category", ""),
+                        "dietary_requirements": food.get("dietary_requirements", []),
+                        "allergens": food.get("allergens", []),
+                        "id": str(food.get("id", ""))
+                    }
+                    for food in foods_result
+                ]
+                
+                logger.info(f"Fetched {len(available_foods)} available foods for AI context")
+            else:
+                logger.warning("No available foods found in the database")
+        except Exception as e:
+            logger.error(f"Error fetching available foods: {e}")
+            # Continue without available foods if there's an error
+        
         # Get AI recommendations
         ai_recommendations = await get_ai_food_recommendations(
             query=request.query,
             user_preferences=user_preferences,
-            limit=request.limit
+            limit=request.limit,
+            available_foods=available_foods
         )
+        
+        # If recommendations include food IDs from our database, fetch the full details
+        if ai_recommendations.get("success") and ai_recommendations.get("recommendations"):
+            for recommendation in ai_recommendations["recommendations"]:
+                # Check if the recommendation has a food_id field that matches our database
+                if "food_id" in recommendation and recommendation["food_id"]:
+                    try:
+                        food_id = recommendation["food_id"]
+                        food_details = await execute_query(
+                            table="foods",
+                            query_type="select",
+                            filters={"id": food_id}
+                        )
+                        
+                        if food_details and len(food_details) > 0:
+                            recommendation["database_item"] = food_details[0]
+                    except Exception as e:
+                        logger.error(f"Error fetching food details for ID {recommendation.get('food_id')}: {e}")
         
         return ai_recommendations
     except Exception as e:
@@ -155,8 +207,30 @@ async def dr_foodlove_recommendations(
     Get personalized food recommendations from Dr. Foodlove AI.
     
     This endpoint provides nutritionally balanced recommendations based on user preferences.
+    If an item_id is provided, it will fetch the details of that food item.
     """
     try:
+        # Check if item_id is provided and fetch food item details
+        food_item = None
+        if request.item_id:
+            try:
+                food_id = UUID(request.item_id)
+                
+                # Fetch food item from database
+                food_items = await execute_query(
+                    table="foods",
+                    query_type="select",
+                    filters={"id": str(food_id)}
+                )
+                
+                if food_items and len(food_items) > 0:
+                    food_item = food_items[0]
+                    # Add the food item to the request query for context
+                    request.query = f"Tell me about this food: {food_item['title']}. {request.query}"
+            except Exception as e:
+                logger.error(f"Error fetching food item: {e}")
+                # Continue with the request even if food item fetch fails
+        
         # Get user preferences if requested and user is authenticated
         user_preferences: Optional[Dict[str, Any]] = None
         
@@ -182,13 +256,68 @@ async def dr_foodlove_recommendations(
             # Use only custom preferences if provided
             user_preferences = request.custom_preferences
         
+        # Fetch available foods from the database to provide context to the AI
+        available_foods = []
+        try:
+            # Get a sample of available foods from the database
+            foods_result = await execute_query(
+                table="foods",
+                query_type="select",
+                filters={"is_available": True},
+                limit=50  # Limit to 50 foods to avoid token limits
+            )
+            
+            if foods_result and len(foods_result) > 0:
+                # Extract relevant information from each food
+                available_foods = [
+                    {
+                        "name": food.get("title", ""),
+                        "description": food.get("description", ""),
+                        "category": food.get("category", ""),
+                        "dietary_requirements": food.get("dietary_requirements", []),
+                        "allergens": food.get("allergens", []),
+                        "id": str(food.get("id", ""))
+                    }
+                    for food in foods_result
+                ]
+                
+                logger.info(f"Fetched {len(available_foods)} available foods for Dr. FoodLove context")
+            else:
+                logger.warning("No available foods found in the database")
+        except Exception as e:
+            logger.error(f"Error fetching available foods: {e}")
+            # Continue without available foods if there's an error
+        
         # Get Dr. Foodlove recommendations
         recommendations = await get_dr_foodlove_recommendations(
             query=request.query,
             user_preferences=user_preferences,
             limit=request.limit,
-            detailed_response=request.detailed_response
+            detailed_response=request.detailed_response,
+            available_foods=available_foods
         )
+        
+        # Add food item to the response if it was fetched
+        if food_item:
+            recommendations["food_item"] = food_item
+            
+        # If recommendations include food IDs from our database, fetch the full details
+        if recommendations.get("success") and recommendations.get("recommendations"):
+            for recommendation in recommendations["recommendations"]:
+                # Check if the recommendation has a food_id field that matches our database
+                if "food_id" in recommendation and recommendation["food_id"]:
+                    try:
+                        food_id = recommendation["food_id"]
+                        food_details = await execute_query(
+                            table="foods",
+                            query_type="select",
+                            filters={"id": food_id}
+                        )
+                        
+                        if food_details and len(food_details) > 0:
+                            recommendation["database_item"] = food_details[0]
+                    except Exception as e:
+                        logger.error(f"Error fetching food details for ID {recommendation.get('food_id')}: {e}")
         
         return recommendations
     except Exception as e:
@@ -256,14 +385,65 @@ async def get_dr_foodlove_image_recommendations(
             # Use only custom preferences if provided
             user_preferences = parsed_custom_preferences
         
+        # Fetch available foods from the database to provide context to the AI
+        available_foods = []
+        try:
+            # Get a sample of available foods from the database
+            foods_result = await execute_query(
+                table="foods",
+                query_type="select",
+                filters={"is_available": True},
+                limit=50  # Limit to 50 foods to avoid token limits
+            )
+            
+            if foods_result and len(foods_result) > 0:
+                # Extract relevant information from each food
+                available_foods = [
+                    {
+                        "name": food.get("title", ""),
+                        "description": food.get("description", ""),
+                        "category": food.get("category", ""),
+                        "dietary_requirements": food.get("dietary_requirements", []),
+                        "allergens": food.get("allergens", []),
+                        "id": str(food.get("id", ""))
+                    }
+                    for food in foods_result
+                ]
+                
+                logger.info(f"Fetched {len(available_foods)} available foods for Dr. FoodLove image context")
+            else:
+                logger.warning("No available foods found in the database")
+        except Exception as e:
+            logger.error(f"Error fetching available foods: {e}")
+            # Continue without available foods if there's an error
+        
         # Get Dr. Foodlove recommendations with the image
         recommendations = await get_dr_foodlove_recommendations(
             query=query,
             user_preferences=user_preferences,
             limit=limit,
             food_image_path=temp_file_path,
-            detailed_response=detailed_response
+            detailed_response=detailed_response,
+            available_foods=available_foods
         )
+        
+        # If recommendations include food IDs from our database, fetch the full details
+        if recommendations.get("success") and recommendations.get("recommendations"):
+            for recommendation in recommendations["recommendations"]:
+                # Check if the recommendation has a food_id field that matches our database
+                if "food_id" in recommendation and recommendation["food_id"]:
+                    try:
+                        food_id = recommendation["food_id"]
+                        food_details = await execute_query(
+                            table="foods",
+                            query_type="select",
+                            filters={"id": food_id}
+                        )
+                        
+                        if food_details and len(food_details) > 0:
+                            recommendation["database_item"] = food_details[0]
+                    except Exception as e:
+                        logger.error(f"Error fetching food details for ID {recommendation.get('food_id')}: {e}")
         
         # Clean up the temporary file
         os.unlink(temp_file_path)

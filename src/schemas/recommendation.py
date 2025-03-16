@@ -60,6 +60,8 @@ class AIFoodRecommendation(BaseModel):
     cuisine_type: Optional[str] = None
     dietary_tags: Optional[List[str]] = None
     confidence_score: Optional[float] = None
+    food_id: Optional[str] = None  # ID of the food in the database if it exists
+    database_item: Optional[Dict[str, Any]] = None  # Full details of the food from the database
 
 
 class AIRecommendationResponse(BaseModel):
@@ -69,6 +71,7 @@ class AIRecommendationResponse(BaseModel):
     recommendations: List[Dict[str, Any]] = Field(default_factory=list)
     user_preferences_applied: bool = False
     error: Optional[str] = None
+    raw_result: Optional[str] = None  # Raw result from the AI for debugging
 
 
 # Schemas for Dr. Foodlove recommendations
@@ -80,6 +83,7 @@ class DrFoodloveRequest(BaseModel):
     limit: int = 5
     detailed_response: bool = False
     custom_preferences: Optional[Dict[str, Any]] = None
+    item_id: Optional[str] = None
 
 
 class DrFoodloveNutritionInfo(BaseModel):
@@ -111,6 +115,9 @@ class DrFoodloveRecommendation(BaseModel):
     cook_time: Optional[str] = None
     total_time: Optional[str] = None
     servings: Optional[int] = None
+    food_id: Optional[str] = None  # ID of the food in the database if it exists
+    database_item: Optional[Dict[str, Any]] = None  # Full details of the food from the database
+    image_url: Optional[str] = None  # URL to an image of the food
 
 
 class DrFoodloveHealthInsights(BaseModel):
@@ -129,4 +136,7 @@ class DrFoodloveResponse(BaseModel):
     recommendations: List[Dict[str, Any]] = Field(default_factory=list)
     user_preferences_applied: bool = False
     health_insights: Optional[DrFoodloveHealthInsights] = None
-    error: Optional[str] = None 
+    error: Optional[str] = None
+    conversation: Optional[str] = None
+    food_item: Optional[Dict[str, Any]] = None
+    raw_result: Optional[str] = None  # Raw result from the AI for debugging 

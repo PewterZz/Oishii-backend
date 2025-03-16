@@ -19,20 +19,43 @@ Query: {query}
 
 {preferences_section}
 
+{available_foods_section}
+
+IMPORTANT GUIDELINES:
+1. ONLY recommend foods that are likely to exist in a typical food database.
+2. DO NOT invent fictional dishes or make up random food items.
+3. Provide recommendations in a structured format as shown below.
+4. Focus on real, common dishes that match the user's query and preferences.
+5. Include nutritional benefits where relevant.
+6. If dietary restrictions are provided, strictly adhere to them.
+7. If available foods are provided, prioritize recommending those foods.
+
 Please provide {limit} food recommendations that are:
 1. Nutritionally balanced
 2. Aligned with the user's preferences and restrictions
 3. Practical to prepare
 4. Varied in cuisine types
 
-For each recommendation, include:
-- Name of the dish
-- Brief description
-- Key ingredients
-- Basic preparation instructions
-- Nutritional highlights
-- Cuisine type
-- Any dietary tags (vegetarian, gluten-free, etc.)
+YOUR RESPONSE MUST BE IN THIS JSON FORMAT:
+```json
+[
+  {{
+    "name": "Specific Dish Name",
+    "description": "Brief description of the dish and why it matches the query",
+    "ingredients": ["ingredient1", "ingredient2", "ingredient3"],
+    "preparation": "Brief preparation method (optional)",
+    "nutritional_info": "Brief nutritional highlights",
+    "cuisine_type": "Cuisine category",
+    "dietary_tags": ["tag1", "tag2"],
+    "food_id": "ID of the food in the database (if available)"
+  }},
+  {{
+    // Additional recommendations...
+  }}
+]
+```
+
+DO NOT include any text outside the JSON structure. Your entire response should be valid JSON that can be parsed programmatically.
 """
 
 
@@ -41,7 +64,8 @@ async def get_dr_foodlove_recommendations(
     user_preferences: Optional[Dict[str, Any]] = None,
     limit: int = 5,
     food_image_path: Optional[str] = None,
-    detailed_response: bool = False
+    detailed_response: bool = False,
+    available_foods: Optional[List[Dict[str, Any]]] = None
 ) -> Dict[str, Any]:
     """
     Get personalized food recommendations from Dr. Foodlove AI.
@@ -52,6 +76,7 @@ async def get_dr_foodlove_recommendations(
         limit: Maximum number of recommendations to return
         food_image_path: Optional path to a food image for analysis
         detailed_response: Whether to include detailed nutritional information
+        available_foods: Optional list of available foods in the database to constrain recommendations
         
     Returns:
         Dictionary containing AI recommendations and metadata
@@ -59,6 +84,7 @@ async def get_dr_foodlove_recommendations(
     # Log the input parameters for debugging
     logger.info(f"Dr.Foodlove API called with query: '{query}'")
     logger.info(f"User preferences provided: {user_preferences is not None}")
+    logger.info(f"Available foods provided: {available_foods is not None}")
     logger.info(f"Limit: {limit}, Detailed response: {detailed_response}")
     
     # Format the preferences section if provided
@@ -99,10 +125,34 @@ async def get_dr_foodlove_recommendations(
     else:
         preferences_section = "No specific user preferences provided."
     
+    # Format the available foods section if provided
+    available_foods_section = ""
+    if available_foods and len(available_foods) > 0:
+        # Limit the number of foods to include to avoid token limits
+        food_sample = available_foods[:20] if len(available_foods) > 20 else available_foods
+        
+        # Format the available foods as a list
+        foods_list = []
+        for food in food_sample:
+            food_info = f"{food.get('name', '')} (ID: {food.get('id', '')})"
+            if food.get('category'):
+                food_info += f" - Category: {food.get('category')}"
+            if food.get('dietary_requirements') and len(food.get('dietary_requirements')) > 0:
+                food_info += f" - Dietary: {', '.join(food.get('dietary_requirements'))}"
+            foods_list.append(food_info)
+        
+        available_foods_section = "Available Foods in Database:\n" + "\n".join(foods_list)
+        
+        # Add a note to use food IDs when possible
+        available_foods_section += "\n\nWhen recommending any of these foods, please include their ID in the food_id field."
+    else:
+        available_foods_section = "No specific available foods provided."
+    
     # Format the prompt
     prompt = DR_FOODLOVE_PROMPT_TEMPLATE.format(
         query=query,
         preferences_section=preferences_section,
+        available_foods_section=available_foods_section,
         limit=limit
     )
     
@@ -116,7 +166,8 @@ async def get_dr_foodlove_recommendations(
             query=prompt,
             user_preferences=None,  # We've already formatted the preferences in our prompt
             limit=limit,
-            file_path=food_image_path
+            file_path=food_image_path,
+            available_foods=available_foods  # Pass available foods to the langflow service
         )
         
         # Log the raw response for debugging
@@ -134,6 +185,10 @@ async def get_dr_foodlove_recommendations(
                     response["recommendations"],
                     user_preferences
                 )
+            
+            # Add the full conversation to the response
+            if "result" in response:
+                response["conversation"] = response["result"]
                 
             # Log the number of recommendations
             logger.info(f"Successfully processed {len(response.get('recommendations', []))} recommendations")
