@@ -1,3 +1,5 @@
+print("Loading main.py...")
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -22,14 +24,29 @@ DEBUG = os.getenv("DEBUG", "False").lower() == "true"
 ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
+print("Defining lifespan function...")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Connect to Supabase and start scheduler
     print(f"Starting up: Connected to Supabase in {ENVIRONMENT} environment")
     
-    # Initialize DataStax
-    await initialize_datastax()
-    print("Initialized DataStax connection and tables")
+    # Initialize DataStax if enabled
+    use_datastax = os.getenv("USE_DATASTAX", "True").lower() == "true"
+    use_datastax_llm_only = os.getenv("USE_DATASTAX_LLM_ONLY", "False").lower() == "true"
+    
+    print(f"DataStax configuration: USE_DATASTAX={use_datastax}, USE_DATASTAX_LLM_ONLY={use_datastax_llm_only}")
+    
+    if use_datastax:
+        try:
+            print("Starting DataStax initialization...")
+            await initialize_datastax()
+            print("Initialized DataStax connection and tables")
+        except Exception as e:
+            print(f"Error initializing DataStax: {e}")
+            print("Continuing without DataStax database connection")
+    else:
+        print("DataStax initialization skipped (USE_DATASTAX=False)")
     
     # Start scheduler in a background task
     if ENVIRONMENT == "production":
@@ -48,6 +65,8 @@ async def lifespan(app: FastAPI):
             await task
         except asyncio.CancelledError:
             print("Scheduler task cancelled")
+
+print("Creating FastAPI application...")
 
 app = FastAPI(
     title=APP_NAME,
@@ -203,3 +222,9 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         status_code=422,
         content={"detail": error_messages}
     )
+
+# Run the application if this file is executed directly
+if __name__ == "__main__":
+    import uvicorn
+    print("Running application directly with uvicorn...")
+    uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=True)

@@ -147,7 +147,7 @@ async def get_ai_recommendations(
 
 
 @router.post("/dr-foodlove", response_model=DrFoodloveResponse)
-async def get_dr_foodlove_recommendations(
+async def dr_foodlove_recommendations(
     request: DrFoodloveRequest,
     current_user: Optional[dict] = Depends(get_current_user)
 ):

@@ -27,6 +27,9 @@ ASTRA_DB_SECURE_BUNDLE_PATH = os.getenv("ASTRA_DB_SECURE_BUNDLE_PATH")
 # Check if we're using Astra DB or a local Cassandra instance
 USE_ASTRA = all([ASTRA_DB_ID, ASTRA_DB_USERNAME, ASTRA_DB_PASSWORD])
 
+# Check if we're only using DataStax for LLM functionality
+USE_DATASTAX_LLM_ONLY = os.getenv("USE_DATASTAX_LLM_ONLY", "False").lower() == "true"
+
 # Global cluster connection
 _cluster = None
 _session = None
@@ -35,6 +38,10 @@ _session = None
 def get_cluster():
     """Get or create the Cassandra cluster connection"""
     global _cluster
+    
+    if USE_DATASTAX_LLM_ONLY:
+        logger.info("Skipping Cassandra cluster connection (LLM-only mode)")
+        return None
     
     if _cluster is None:
         if USE_ASTRA:
@@ -77,10 +84,15 @@ def get_session():
     """Get or create the Cassandra session"""
     global _session
     
+    if USE_DATASTAX_LLM_ONLY:
+        logger.info("Skipping Cassandra session creation (LLM-only mode)")
+        return None
+    
     if _session is None:
         cluster = get_cluster()
-        _session = cluster.connect(ASTRA_DB_KEYSPACE)
-        logger.info(f"Connected to keyspace: {ASTRA_DB_KEYSPACE}")
+        if cluster:
+            _session = cluster.connect(ASTRA_DB_KEYSPACE)
+            logger.info(f"Connected to keyspace: {ASTRA_DB_KEYSPACE}")
     
     return _session
 
@@ -89,6 +101,9 @@ def run_async(f):
     """Decorator to run synchronous Cassandra operations in an async context"""
     @wraps(f)
     async def wrapper(*args, **kwargs):
+        if USE_DATASTAX_LLM_ONLY:
+            logger.info(f"Skipping Cassandra operation {f.__name__} (LLM-only mode)")
+            return []
         return await asyncio.to_thread(f, *args, **kwargs)
     return wrapper
 
@@ -97,6 +112,9 @@ def run_async(f):
 def execute_query(query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Execute a CQL query and return the results as a list of dictionaries"""
     session = get_session()
+    if not session:
+        return []
+        
     statement = SimpleStatement(query)
     
     if params:
@@ -123,7 +141,9 @@ def execute_query(query: str, params: Optional[Dict[str, Any]] = None) -> List[D
 def create_tables():
     """Create the necessary tables for the recommendation system if they don't exist"""
     session = get_session()
-    
+    if not session:
+        return
+        
     # Create user_profiles table
     session.execute("""
     CREATE TABLE IF NOT EXISTS user_profiles (
@@ -327,7 +347,12 @@ def get_food_recommendations(search_term: str, user_id: Optional[UUID] = None, l
 async def initialize_datastax():
     """Initialize DataStax connection and create tables"""
     try:
+        if USE_DATASTAX_LLM_ONLY:
+            logger.info("DataStax initialization skipped for database (LLM-only mode)")
+            return
+            
         await create_tables()
         logger.info("DataStax initialization complete")
     except Exception as e:
-        logger.error(f"Error initializing DataStax: {e}") 
+        logger.error(f"Error initializing DataStax: {e}")
+        raise 

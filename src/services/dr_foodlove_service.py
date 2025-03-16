@@ -56,6 +56,11 @@ async def get_dr_foodlove_recommendations(
     Returns:
         Dictionary containing AI recommendations and metadata
     """
+    # Log the input parameters for debugging
+    logger.info(f"Dr.Foodlove API called with query: '{query}'")
+    logger.info(f"User preferences provided: {user_preferences is not None}")
+    logger.info(f"Limit: {limit}, Detailed response: {detailed_response}")
+    
     # Format the preferences section if provided
     preferences_section = ""
     if user_preferences:
@@ -101,28 +106,61 @@ async def get_dr_foodlove_recommendations(
         limit=limit
     )
     
-    # Get recommendations using the langflow service
-    response = await get_ai_food_recommendations(
-        query=prompt,
-        user_preferences=None,  # We've already formatted the preferences in our prompt
-        limit=limit,
-        file_path=food_image_path
-    )
+    # Log the formatted prompt
+    logger.info(f"Formatted Dr.Foodlove prompt: {prompt[:200]}...")
     
-    # Add Dr. Foodlove branding to the response
-    if response.get("success", False):
-        response["provider"] = "Dr. Foodlove AI"
-        response["query"] = query  # Use the original query, not our formatted prompt
+    try:
+        # Get recommendations using the langflow service
+        logger.info("Calling langflow service for recommendations...")
+        response = await get_ai_food_recommendations(
+            query=prompt,
+            user_preferences=None,  # We've already formatted the preferences in our prompt
+            limit=limit,
+            file_path=food_image_path
+        )
         
-        # Add health insights if detailed response is requested
-        if detailed_response and response.get("recommendations"):
-            response["health_insights"] = generate_health_insights(
-                query, 
-                response["recommendations"],
-                user_preferences
-            )
-    
-    return response
+        # Log the raw response for debugging
+        logger.info(f"Raw response from langflow service: {json.dumps(response)[:500]}...")
+        
+        # Add Dr. Foodlove branding to the response
+        if response.get("success", False):
+            response["provider"] = "Dr. Foodlove AI"
+            response["query"] = query  # Use the original query, not our formatted prompt
+            
+            # Add health insights if detailed response is requested
+            if detailed_response and response.get("recommendations"):
+                response["health_insights"] = generate_health_insights(
+                    query, 
+                    response["recommendations"],
+                    user_preferences
+                )
+                
+            # Log the number of recommendations
+            logger.info(f"Successfully processed {len(response.get('recommendations', []))} recommendations")
+        else:
+            # Ensure error responses include required fields
+            if "query" not in response:
+                response["query"] = query
+            if "provider" not in response:
+                response["provider"] = "Dr. Foodlove AI"
+            if "user_preferences_applied" not in response:
+                response["user_preferences_applied"] = user_preferences is not None
+            
+            # Log the error
+            logger.error(f"Error in langflow service response: {response.get('error', 'Unknown error')}")
+        
+        return response
+    except Exception as e:
+        logger.error(f"Error in Dr. Foodlove service: {e}")
+        # Return a properly formatted error response with all required fields
+        return {
+            "success": False,
+            "query": query,
+            "provider": "Dr. Foodlove AI",
+            "recommendations": [],
+            "user_preferences_applied": user_preferences is not None,
+            "error": f"Dr. Foodlove service error: {str(e)}"
+        }
 
 
 def generate_health_insights(

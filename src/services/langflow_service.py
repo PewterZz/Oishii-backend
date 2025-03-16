@@ -66,6 +66,25 @@ async def run_langflow(
     application_token = application_token or APPLICATION_TOKEN
     tweaks = tweaks or DEFAULT_TWEAKS
 
+    # Validate required credentials
+    if not application_token:
+        error_msg = "DataStax Langflow application token is missing. Please set DATASTAX_APPLICATION_TOKEN in your .env file."
+        logger.error(error_msg)
+        return {
+            "error": True,
+            "message": error_msg,
+            "status_code": 401
+        }
+    
+    if not endpoint:
+        error_msg = "DataStax Langflow endpoint or flow ID is missing. Please set DATASTAX_ENDPOINT or DATASTAX_FLOW_ID in your .env file."
+        logger.error(error_msg)
+        return {
+            "error": True,
+            "message": error_msg,
+            "status_code": 400
+        }
+
     # Handle file upload if requested
     if file_path and components and HAS_LANGFLOW:
         try:
@@ -87,6 +106,15 @@ async def run_langflow(
 
     # Construct API URL
     api_url = f"{BASE_API_URL}/lf/{LANGFLOW_ID}/api/v1/run/{endpoint}"
+    
+    # Log configuration for debugging
+    logger.info(f"DataStax Langflow Configuration:")
+    logger.info(f"  API URL: {BASE_API_URL}")
+    logger.info(f"  Langflow ID: {LANGFLOW_ID}")
+    logger.info(f"  Endpoint/Flow ID: {endpoint}")
+    logger.info(f"  Full API URL: {api_url}")
+    logger.info(f"  Token provided: {'Yes' if application_token else 'No'}")
+    logger.info(f"  Token length: {len(application_token) if application_token else 0}")
 
     # Prepare payload
     payload = {
@@ -100,26 +128,47 @@ async def run_langflow(
         payload["tweaks"] = tweaks
     
     # Prepare headers
-    headers = None
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
     if application_token:
-        headers = {
-            "Authorization": f"Bearer {application_token}",
-            "Content-Type": "application/json"
-        }
+        headers["Authorization"] = f"Bearer {application_token}"
     
     try:
         # Make the API request
+        logger.info(f"Calling DataStax Langflow API at {api_url}")
         response = requests.post(api_url, json=payload, headers=headers)
-        response.raise_for_status()  # Raise exception for HTTP errors
+        
+        # Check for HTTP errors
+        if response.status_code != 200:
+            error_msg = f"DataStax Langflow API returned status code {response.status_code}"
+            try:
+                error_data = response.json()
+                if isinstance(error_data, dict):
+                    if "detail" in error_data:
+                        error_msg = f"{error_msg}: {error_data['detail']}"
+                    logger.error(f"Error response data: {error_data}")
+            except Exception as e:
+                error_msg = f"{error_msg}: {response.text[:200]}"
+                logger.error(f"Failed to parse error response: {e}")
+            
+            logger.error(error_msg)
+            return {
+                "error": True,
+                "message": error_msg,
+                "status_code": response.status_code
+            }
         
         # Return the JSON response
         return response.json()
     except requests.exceptions.RequestException as e:
-        logger.error(f"Error calling DataStax Langflow API: {e}")
+        error_msg = f"Error calling DataStax Langflow API: {e}"
+        logger.error(error_msg)
         # Return error response
         return {
             "error": True,
-            "message": f"Failed to call DataStax Langflow API: {str(e)}",
+            "message": error_msg,
             "status_code": getattr(e.response, "status_code", 500) if hasattr(e, "response") else 500
         }
 
@@ -128,7 +177,8 @@ async def get_ai_food_recommendations(
     query: str,
     user_preferences: Optional[Dict[str, Any]] = None,
     limit: int = 5,
-    file_path: Optional[str] = None
+    file_path: Optional[str] = None,
+    application_token: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Get AI-powered food recommendations using DataStax Langflow.
@@ -138,10 +188,30 @@ async def get_ai_food_recommendations(
         user_preferences: Optional user preferences to customize recommendations
         limit: Maximum number of recommendations to return
         file_path: Optional path to a file (e.g., image of food) to analyze
+        application_token: Optional application token for authentication (defaults to env variable)
         
     Returns:
         Dictionary containing AI recommendations and metadata
     """
+    # Log the function call
+    logger.info(f"get_ai_food_recommendations called with query: '{query[:100]}...'")
+    logger.info(f"User preferences provided: {user_preferences is not None}")
+    
+    # Use default token if not provided
+    application_token = application_token or APPLICATION_TOKEN
+    
+    # Check if token is available
+    if not application_token:
+        error_msg = "DataStax Langflow application token is missing"
+        logger.error(error_msg)
+        return {
+            "success": False,
+            "query": query,
+            "recommendations": [],
+            "user_preferences_applied": user_preferences is not None,
+            "error": error_msg
+        }
+    
     # Construct a more detailed prompt if user preferences are provided
     if user_preferences:
         # Format user preferences into a readable string
@@ -157,40 +227,66 @@ async def get_ai_food_recommendations(
         # You would need to adjust this based on your actual flow configuration
         components = ["ImageComponent-XYZ"]  # Replace with actual component ID
     
-    # Call the Langflow API
-    response = await run_langflow(
-        message=message,
-        file_path=file_path,
-        components=components
-    )
-    
-    # Check for errors
-    if response.get("error"):
-        logger.error(f"Error getting AI food recommendations: {response.get('message')}")
-        return {
-            "success": False,
-            "error": response.get("message", "Unknown error"),
-            "recommendations": []
-        }
-    
-    # Process the response to extract structured recommendations
     try:
-        processed_recommendations = process_ai_recommendations(response, limit)
+        # Call the Langflow API
+        logger.info(f"Calling run_langflow with query length: {len(query)}")
+        response = await run_langflow(
+            message=message,
+            file_path=file_path,
+            components=components,
+            application_token=application_token
+        )
         
-        return {
-            "success": True,
-            "query": query,
-            "recommendations": processed_recommendations,
-            "user_preferences_applied": user_preferences is not None,
-            "raw_response": response  # Include the raw response for debugging
-        }
+        # Log the raw response for debugging
+        logger.info(f"Raw response from run_langflow: {json.dumps(response)[:500]}...")
+        
+        # Check for errors in the response
+        if response.get("error"):
+            error_msg = f"Error from DataStax Langflow: {response.get('message', 'Unknown error')}"
+            logger.error(error_msg)
+            return {
+                "success": False,
+                "query": query,
+                "recommendations": [],
+                "user_preferences_applied": user_preferences is not None,
+                "error": error_msg
+            }
+        
+        # Process the response
+        try:
+            # Extract the recommendations from the response
+            recommendations = process_ai_recommendations(response, limit)
+            
+            # Log the number of recommendations
+            logger.info(f"Processed {len(recommendations)} recommendations")
+            
+            # Return the formatted response
+            return {
+                "success": True,
+                "query": query,
+                "recommendations": recommendations,
+                "user_preferences_applied": user_preferences is not None
+            }
+        except Exception as e:
+            error_msg = f"Error processing AI recommendations: {e}"
+            logger.error(error_msg)
+            logger.error(f"Response that caused the error: {json.dumps(response)[:500]}...")
+            return {
+                "success": False,
+                "query": query,
+                "recommendations": [],
+                "user_preferences_applied": user_preferences is not None,
+                "error": error_msg
+            }
     except Exception as e:
-        logger.error(f"Error processing AI recommendations: {e}")
+        error_msg = f"Error calling DataStax Langflow: {e}"
+        logger.error(error_msg)
         return {
             "success": False,
-            "error": f"Failed to process AI recommendations: {str(e)}",
+            "query": query,
             "recommendations": [],
-            "raw_response": response
+            "user_preferences_applied": user_preferences is not None,
+            "error": error_msg
         }
 
 
