@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from .api.v1.api import router as api_router
@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 import asyncio
 from .core.scheduler import run_scheduled_tasks
 from .core.datastax import initialize_datastax
@@ -174,3 +175,31 @@ async def root():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "environment": ENVIRONMENT}
+
+# Add exception handler for validation errors
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = exc.errors()
+    error_messages = []
+    
+    for error in errors:
+        # Check if it's a UUID parsing error
+        if error.get("type") == "uuid_parsing":
+            loc = error.get("loc", [])
+            if len(loc) >= 2 and loc[0] == "path" and loc[1] == "food_id":
+                input_value = error.get("input", "")
+                return JSONResponse(
+                    status_code=422,
+                    content={
+                        "detail": f"Invalid UUID format for food_id: '{input_value}'. Please provide a valid UUID.",
+                        "hint": "If you're trying to get a list of foods, use the /api/v1/foods endpoint instead."
+                    }
+                )
+        
+        # Add other error messages
+        error_messages.append(error)
+    
+    return JSONResponse(
+        status_code=422,
+        content={"detail": error_messages}
+    )

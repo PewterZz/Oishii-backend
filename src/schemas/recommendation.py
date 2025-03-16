@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from datetime import datetime
 from uuid import UUID
 
@@ -37,4 +37,96 @@ class RecommendationResponse(BaseModel):
     """Response containing food recommendations"""
     recommendations: List[FoodRecommendation] = Field(default_factory=list)
     total: int
-    search_term: str 
+    search_term: str
+
+
+# New schemas for AI-powered recommendations
+
+class AIRecommendationRequest(BaseModel):
+    """Request for AI-powered food recommendations"""
+    query: str
+    include_user_preferences: bool = True
+    limit: int = 5
+    tweaks: Optional[Dict[str, Any]] = None
+
+
+class AIFoodRecommendation(BaseModel):
+    """AI-generated food recommendation"""
+    name: str
+    description: Optional[str] = None
+    ingredients: Optional[List[str]] = None
+    preparation: Optional[str] = None
+    nutritional_info: Optional[Dict[str, Any]] = None
+    cuisine_type: Optional[str] = None
+    dietary_tags: Optional[List[str]] = None
+    confidence_score: Optional[float] = None
+
+
+class AIRecommendationResponse(BaseModel):
+    """Response containing AI-powered food recommendations"""
+    success: bool
+    query: str
+    recommendations: List[Dict[str, Any]] = Field(default_factory=list)
+    user_preferences_applied: bool = False
+    error: Optional[str] = None
+
+
+# Schemas for Dr. Foodlove recommendations
+
+class DrFoodloveRequest(BaseModel):
+    """Request for Dr. Foodlove food recommendations"""
+    query: str
+    include_user_preferences: bool = True
+    limit: int = 5
+    detailed_response: bool = False
+    custom_preferences: Optional[Dict[str, Any]] = None
+
+
+class DrFoodloveNutritionInfo(BaseModel):
+    """Nutritional information for a food recommendation"""
+    calories: Optional[float] = None
+    protein: Optional[float] = None
+    carbs: Optional[float] = None
+    fat: Optional[float] = None
+    fiber: Optional[float] = None
+    sugar: Optional[float] = None
+    sodium: Optional[float] = None
+    vitamins: Optional[List[str]] = None
+    minerals: Optional[List[str]] = None
+
+
+class DrFoodloveRecommendation(BaseModel):
+    """Dr. Foodlove food recommendation"""
+    name: str
+    description: Optional[str] = None
+    ingredients: Optional[List[str]] = None
+    preparation: Optional[str] = None
+    nutritional_info: Optional[Dict[str, Any]] = None
+    cuisine_type: Optional[str] = None
+    dietary_tags: Optional[List[str]] = None
+    health_benefits: Optional[List[str]] = None
+    meal_type: Optional[str] = None
+    difficulty: Optional[str] = None
+    prep_time: Optional[str] = None
+    cook_time: Optional[str] = None
+    total_time: Optional[str] = None
+    servings: Optional[int] = None
+
+
+class DrFoodloveHealthInsights(BaseModel):
+    """Health insights from Dr. Foodlove"""
+    variety: int
+    nutrient_focus: List[str] = Field(default_factory=list)
+    balance_score: int
+    recommendations: List[str] = Field(default_factory=list)
+
+
+class DrFoodloveResponse(BaseModel):
+    """Response containing Dr. Foodlove food recommendations"""
+    success: bool
+    query: str
+    provider: str = "Dr. Foodlove AI"
+    recommendations: List[Dict[str, Any]] = Field(default_factory=list)
+    user_preferences_applied: bool = False
+    health_insights: Optional[DrFoodloveHealthInsights] = None
+    error: Optional[str] = None 

@@ -211,6 +211,21 @@ async def get_nearby_foods(
     # Skip the first 'skip' foods
     return filtered_foods[skip:skip + limit]
 
+@router.get("/foods", response_model=List[FoodResponse])
+async def get_foods_special():
+    """
+    Special handler for when 'foods' is passed as the food_id.
+    This redirects to the main get_foods endpoint.
+    """
+    # Get foods from database with default filters
+    foods = await execute_query(
+        table="foods",
+        query_type="select",
+        limit=10
+    )
+    
+    return foods
+
 @router.get("/{food_id}", response_model=FoodResponse)
 async def get_food(food_id: UUID4 = Path(...)):
     """
