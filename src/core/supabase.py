@@ -3,6 +3,7 @@ from typing import Optional, Dict, Any
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import httpx
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -56,6 +57,12 @@ async def verify_token(token: str, type: str = "signup") -> Dict[str, Any]:
         print(f"Error type: {type(e)}")
         print(f"Error details: {repr(e)}")
         raise e
+
+def serialize_datetime(obj):
+    """Convert datetime objects to ISO format strings."""
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return obj
 
 # Helper functions for database operations
 async def execute_query(
@@ -147,6 +154,8 @@ async def execute_query(
             if not data:
                 raise ValueError("Data is required for insert operations")
             
+            data = {key: serialize_datetime(value) for key, value in data.items()}
+
             try:
                 # Try the standard insert method
                 result = query.insert(data).execute()
