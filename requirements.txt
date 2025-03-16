@@ -1,33 +1,33 @@
-fastapi==0.104.1
-uvicorn==0.23.2
-pydantic==2.4.2
-pydantic-settings==2.0.3
-python-dotenv==1.0.0
+fastapi>=0.115.2  # Updated to meet langflow requirements
+uvicorn>=0.30.0  # Updated to meet langflow requirements
+pydantic>=2.7.0
+pydantic-settings==2.4.0
+python-dotenv>=1.0.1  # Upgraded to meet astra-assistants & langflow requirements
 python-jose==3.3.0
 passlib==1.7.4
-python-multipart==0.0.6
+python-multipart>=0.0.12  # Updated to match langflow requirements
 email-validator==2.1.0.post1
-supabase==1.2.0
-httpx==0.24.0
+supabase>=2.3.0
+httpx>=0.27.0,<0.28.0
 bcrypt==4.0.1
 asyncpg==0.28.0
-gunicorn==21.2.0
+gunicorn>=22.0.0  # Updated to match langflow requirements
 uvloop==0.19.0; sys_platform != 'win32'
-httptools==0.6.1 
+httptools==0.6.1
 psycopg2-binary==2.9.10
-aiofiles==23.2.1
+aiofiles>=24.1.0  # Upgraded to resolve dependency conflict
 cassandra-driver==3.28.0
 # Additional dependencies
-sqlalchemy==2.0.23
-alembic==1.12.1
+sqlalchemy==2.0.39
+alembic>=1.13.0  # Updated to meet langflow requirements
 jinja2==3.1.2
 itsdangerous==2.1.2
-starlette==0.27.0
-typing-extensions==4.8.0
+starlette>=0.37.2  # Updated to match fastapi requirements
+typing-extensions>=4.11.0  # Upgraded to resolve conflict with openai & langchain-openai
 aiocache==0.12.2
-redis==5.0.1
+redis==5.2.1
 geopy==2.4.1
-pandas==2.1.3
+pandas>=2.2.2
 numpy==1.26.2
 scikit-learn==1.3.2
 pytest==7.4.3
@@ -37,5 +37,5 @@ isort==5.12.0
 flake8==6.1.0
 mypy==1.7.0
 # DataStax Langflow integration
-langflow>=1.0.0,<2.0.0
-requests==2.31.0
+langflow>=1.1.0,<2.0.0  # Ensuring compatibility
+requests>=2.32.0
