@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from .endpoints import users, foods, swaps, notifications, ratings, tickets, recommendations
+from .endpoints import users, foods, swaps, notifications, ratings, tickets, recommendations, datastax
 
 router = APIRouter(prefix="/api/v1")
 
@@ -10,4 +10,5 @@ router.include_router(swaps.router, prefix="/swaps")
 router.include_router(notifications.router, prefix="/notifications")
 router.include_router(ratings.router, prefix="/ratings")
 router.include_router(tickets.router, prefix="/tickets")
-router.include_router(recommendations.router, prefix="/recommendations") 
+router.include_router(recommendations.router, prefix="/recommendations")
+router.include_router(datastax.router, prefix="/datastax") 

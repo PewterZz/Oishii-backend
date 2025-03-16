@@ -78,6 +78,8 @@ async def refresh_auth_token() -> str:
     """
     global APPLICATION_TOKEN, TOKEN_EXPIRY, REFRESH_TOKEN
     
+    logger.info("Refreshing DataStax authentication token...")
+    
     # Try to reload refresh token if not available
     if not REFRESH_TOKEN:
         REFRESH_TOKEN = os.getenv("DATASTAX_REFRESH_TOKEN", "")
@@ -88,74 +90,144 @@ async def refresh_auth_token() -> str:
         logger.error("No refresh token available. Cannot refresh authentication token.")
         return APPLICATION_TOKEN
     
+    # Check if refresh token is the same as application token
+    if REFRESH_TOKEN == APPLICATION_TOKEN:
+        logger.warning("Refresh token is identical to application token. This may cause refresh issues.")
+        # Try to use it anyway, as some APIs allow using the same token
+    
     try:
-        # Call the DataStax token refresh endpoint
-        refresh_url = f"{BASE_API_URL}/auth/refresh"
+        # Validate current token first
+        logger.info("Validating current DataStax token...")
+        validation_url = f"{BASE_API_URL}/lf/{LANGFLOW_ID}/api/v1/validate"
         
-        # DataStax may use different refresh mechanisms depending on the token type
-        # Try the standard Bearer token approach first
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {REFRESH_TOKEN}"
+            "Authorization": f"Bearer {APPLICATION_TOKEN}"
         }
         
-        logger.info("Refreshing DataStax authentication token...")
-        logger.info(f"Using refresh URL: {refresh_url}")
-        
-        # Some DataStax APIs expect the token in the request body instead of headers
-        payload = {
-            "refresh_token": REFRESH_TOKEN
-        }
-        
-        # Try with both header and body approaches
-        response = requests.post(refresh_url, headers=headers, json=payload)
-        
-        if response.status_code == 200:
-            token_data = response.json()
-            logger.info(f"Token refresh response: {token_data.keys()}")
+        try:
+            validation_response = requests.get(validation_url, headers=headers, timeout=10)
             
-            # Different APIs might use different field names
-            new_token = token_data.get("access_token") or token_data.get("token") or token_data.get("accessToken")
-            expires_in = token_data.get("expires_in", 3600)  # Default to 1 hour if not specified
-            
-            if new_token:
-                APPLICATION_TOKEN = new_token
-                TOKEN_EXPIRY = time.time() + expires_in - 300  # Set expiry with 5-minute buffer
-                logger.info(f"Successfully refreshed authentication token. Valid for {expires_in} seconds.")
-                return new_token
-            else:
-                logger.error("Token refresh response did not contain a new token.")
-                logger.error(f"Response content: {token_data}")
-        else:
-            logger.error(f"Failed to refresh token. Status code: {response.status_code}")
-            logger.error(f"Response: {response.text}")
-            
-            # If the standard approach failed, try an alternative approach
-            # Some DataStax services use a different endpoint or mechanism
-            if response.status_code == 401:
-                logger.info("Trying alternative token refresh approach...")
-                alt_refresh_url = f"{BASE_API_URL}/api/token/refresh"
-                alt_response = requests.post(alt_refresh_url, json={"token": REFRESH_TOKEN})
+            # If the token is valid, just use it
+            if validation_response.status_code == 200:
+                logger.info("Current token is still valid. No need to refresh.")
+                TOKEN_EXPIRY = time.time() + 3600  # Set expiry to 1 hour from now
+                return APPLICATION_TOKEN
+        except requests.exceptions.RequestException as e:
+            logger.warning(f"Token validation request failed: {e}")
+        
+        # Current token is invalid. Attempting to use refresh token...
+        logger.info("Current token is invalid. Attempting to use refresh token...")
+        
+        # For DataStax, try different refresh approaches
+        refresh_approaches = [
+            # Approach 1: Standard OAuth refresh
+            {
+                "url": f"{BASE_API_URL}/auth/refresh",
+                "headers": {"Content-Type": "application/json", "Authorization": f"Bearer {REFRESH_TOKEN}"},
+                "payload": {"refresh_token": REFRESH_TOKEN}
+            },
+            # Approach 2: DataStax specific refresh
+            {
+                "url": f"{BASE_API_URL}/api/token/refresh",
+                "headers": {"Content-Type": "application/json"},
+                "payload": {"token": REFRESH_TOKEN}
+            },
+            # Approach 3: Try using the refresh token as the application token
+            {
+                "url": validation_url,
+                "headers": {"Content-Type": "application/json", "Authorization": f"Bearer {REFRESH_TOKEN}"},
+                "payload": {}
+            }
+        ]
+        
+        # Try each approach
+        for i, approach in enumerate(refresh_approaches):
+            try:
+                logger.info(f"Trying token refresh approach {i+1}...")
                 
-                if alt_response.status_code == 200:
-                    alt_token_data = alt_response.json()
-                    new_token = alt_token_data.get("access_token") or alt_token_data.get("token")
-                    
-                    if new_token:
-                        APPLICATION_TOKEN = new_token
-                        TOKEN_EXPIRY = time.time() + 3600 - 300  # Default 1 hour with 5-min buffer
-                        logger.info("Successfully refreshed token using alternative approach.")
-                        return new_token
-                    else:
-                        logger.error("Alternative token refresh did not return a new token.")
+                # Use POST for refresh, GET for validation
+                if "refresh" in approach["url"]:
+                    response = requests.post(
+                        approach["url"], 
+                        headers=approach["headers"], 
+                        json=approach["payload"],
+                        timeout=10
+                    )
                 else:
-                    logger.error(f"Alternative token refresh failed. Status: {alt_response.status_code}")
+                    response = requests.get(
+                        approach["url"], 
+                        headers=approach["headers"],
+                        timeout=10
+                    )
+                
+                # Check for CloudFront errors (which return HTML)
+                if response.status_code == 403 and "<!DOCTYPE HTML" in response.text:
+                    logger.warning(f"Approach {i+1} failed with CloudFront 403 error. This may indicate IP restrictions or rate limiting.")
+                    continue
+                
+                if response.status_code == 200:
+                    # For validation approach, just use the refresh token as the application token
+                    if "validate" in approach["url"]:
+                        logger.info("Refresh token is valid as an application token. Using it directly.")
+                        APPLICATION_TOKEN = REFRESH_TOKEN
+                        TOKEN_EXPIRY = time.time() + 3600  # 1 hour
+                        return APPLICATION_TOKEN
+                    
+                    # For refresh approaches, extract the new token
+                    try:
+                        token_data = response.json()
+                        logger.info(f"Token refresh response keys: {token_data.keys()}")
+                        
+                        # Different APIs might use different field names
+                        new_token = token_data.get("access_token") or token_data.get("token") or token_data.get("accessToken")
+                        expires_in = token_data.get("expires_in", 3600)  # Default to 1 hour if not specified
+                        
+                        if new_token:
+                            APPLICATION_TOKEN = new_token
+                            TOKEN_EXPIRY = time.time() + expires_in - 300  # Set expiry with 5-minute buffer
+                            logger.info(f"Successfully refreshed authentication token. Valid for {expires_in} seconds.")
+                            return new_token
+                        else:
+                            logger.warning("Token refresh response did not contain a new token.")
+                    except Exception as e:
+                        logger.warning(f"Error parsing token refresh response: {e}")
+                else:
+                    logger.warning(f"Approach {i+1} failed with status code: {response.status_code}")
+                    # Log response content for debugging, but avoid logging large HTML responses
+                    if response.headers.get('content-type') and 'application/json' in response.headers.get('content-type'):
+                        try:
+                            error_data = response.json()
+                            logger.warning(f"Response: {json.dumps(error_data)[:100]}...")
+                        except:
+                            logger.warning(f"Response: {response.text[:100]}...")
+            except Exception as e:
+                logger.warning(f"Error with refresh approach {i+1}: {e}")
+        
+        # If we get here, all approaches failed
+        logger.error("All token refresh approaches failed.")
+        
+        # As a last resort, try to get a new token from the environment
+        try:
+            logger.info("Attempting to reload token from environment as last resort...")
+            new_app_token = os.getenv("DATASTAX_APPLICATION_TOKEN", "")
+            new_app_token = "".join(new_app_token.split()) if new_app_token else ""
+            
+            if new_app_token and new_app_token != APPLICATION_TOKEN:
+                logger.info("Found a different token in the environment. Using it.")
+                APPLICATION_TOKEN = new_app_token
+                TOKEN_EXPIRY = time.time() + 1800  # Set a shorter expiry (30 min) for this fallback
+                return APPLICATION_TOKEN
+        except Exception as e:
+            logger.error(f"Error reloading token from environment: {e}")
     
     except Exception as e:
         logger.error(f"Error refreshing authentication token: {e}")
     
     # If all refresh attempts failed, return the original token
     logger.warning("Token refresh failed. Using the existing application token.")
+    # Set a short expiry to try again soon
+    TOKEN_EXPIRY = time.time() + 300  # 5 minutes
     return APPLICATION_TOKEN
 
 
@@ -177,6 +249,7 @@ async def get_valid_token() -> str:
     # If no token is available, try to reload from environment
     if not APPLICATION_TOKEN:
         APPLICATION_TOKEN = os.getenv("DATASTAX_APPLICATION_TOKEN", "")
+        APPLICATION_TOKEN = "".join(APPLICATION_TOKEN.split()) if APPLICATION_TOKEN else ""
         logger.info(f"Reloaded APPLICATION_TOKEN from environment. Length: {len(APPLICATION_TOKEN) if APPLICATION_TOKEN else 0}")
     
     if not REFRESH_TOKEN and not APPLICATION_TOKEN:
@@ -187,6 +260,27 @@ async def get_valid_token() -> str:
     current_time = time.time()
     if current_time > TOKEN_EXPIRY:
         logger.info(f"Token expired or about to expire. Current time: {current_time}, Expiry: {TOKEN_EXPIRY}")
+        
+        # Try to validate the current token before refreshing
+        validation_url = f"{BASE_API_URL}/lf/{LANGFLOW_ID}/api/v1/validate"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {APPLICATION_TOKEN}"
+        }
+        
+        try:
+            # Try a quick validation request
+            validation_response = requests.get(validation_url, headers=headers, timeout=5)
+            
+            # If the token is still valid, update the expiry and return it
+            if validation_response.status_code == 200:
+                logger.info("Current token is still valid despite expiry time. Updating expiry.")
+                TOKEN_EXPIRY = current_time + 3600  # Set expiry to 1 hour from now
+                return APPLICATION_TOKEN
+        except Exception as e:
+            logger.warning(f"Token validation check failed: {e}")
+        
+        # If validation failed or we couldn't check, try to refresh
         refreshed_token = await refresh_auth_token()
         
         # If refresh failed and we still have an application token, use it
@@ -205,8 +299,8 @@ async def get_valid_token() -> str:
 async def run_langflow(
     message: str,
     endpoint: Optional[str] = None,
-    output_type: str = "chat",
-    input_type: str = "chat",
+    output_type: str = "text",
+    input_type: str = "text",
     tweaks: Optional[Dict[str, Any]] = None,
     application_token: Optional[str] = None,
     file_path: Optional[str] = None,
@@ -214,75 +308,53 @@ async def run_langflow(
     retry_on_auth_error: bool = True
 ) -> Dict[str, Any]:
     """
-    Run a DataStax Langflow with a given message and optional tweaks.
-
+    Run a message through the DataStax Langflow API.
+    
     Args:
-        message: The message to send to the flow
-        endpoint: The ID or the endpoint name of the flow (defaults to env variable)
-        output_type: The output type (defaults to "chat")
-        input_type: The input type (defaults to "chat")
-        tweaks: Optional tweaks to customize the flow
-        application_token: Optional application token for authentication
-        file_path: Optional path to a file to upload
-        components: Optional list of component IDs to upload the file to
-        retry_on_auth_error: Whether to retry with a refreshed token on auth errors
-
+        message: The message to process
+        endpoint: The endpoint ID to use (defaults to FLOW_ID)
+        output_type: The output type (text, chat, any, debug)
+        input_type: The input type (text, chat, any)
+        tweaks: Optional tweaks to apply to the flow
+        application_token: Optional application token (if not provided, will use get_valid_token)
+        file_path: Optional file path to upload
+        components: Optional list of components to include in the response
+        retry_on_auth_error: Whether to retry on authentication errors
+        
     Returns:
-        The JSON response from the flow
+        The response from the API
     """
-    # Use default values if not provided
-    endpoint = endpoint or ENDPOINT or FLOW_ID
+    # Validate input_type and output_type
+    valid_input_types = ["text", "chat", "any"]
+    valid_output_types = ["text", "chat", "any", "debug"]
     
-    # If no token provided, try to get a valid one
-    if application_token is None:
-        logger.info("No token provided to run_langflow, attempting to get a valid token...")
-        application_token = await get_valid_token()
-        logger.info(f"Retrieved token length: {len(application_token) if application_token else 0}")
+    if input_type not in valid_input_types:
+        logger.warning(f"Invalid input_type: {input_type}. Must be one of {valid_input_types}. Using 'text' instead.")
+        input_type = "text"
     
-    tweaks = tweaks or DEFAULT_TWEAKS
-
-    # Validate required credentials
+    if output_type not in valid_output_types:
+        logger.warning(f"Invalid output_type: {output_type}. Must be one of {valid_output_types}. Using 'text' instead.")
+        output_type = "text"
+    
+    # Get a valid token if not provided
     if not application_token:
-        error_msg = "DataStax Langflow application token is missing. Please set DATASTAX_APPLICATION_TOKEN in your .env file."
-        logger.error(error_msg)
-        return {
-            "error": True,
-            "message": error_msg,
-            "status_code": 401
-        }
+        application_token = await get_valid_token()
     
+    # Use the provided endpoint or fall back to FLOW_ID
+    endpoint = endpoint or FLOW_ID or ENDPOINT
+    
+    # If no endpoint is available, return an error
     if not endpoint:
-        error_msg = "DataStax Langflow endpoint or flow ID is missing. Please set DATASTAX_ENDPOINT or DATASTAX_FLOW_ID in your .env file."
-        logger.error(error_msg)
         return {
             "error": True,
-            "message": error_msg,
+            "message": "No endpoint or flow ID configured",
             "status_code": 400
         }
-
-    # Handle file upload if requested
-    if file_path and components and HAS_LANGFLOW:
-        try:
-            tweaks = upload_file(
-                file_path=file_path,
-                host=BASE_API_URL,
-                flow_id=endpoint,
-                components=components,
-                tweaks=tweaks
-            )
-            logger.info(f"Uploaded file {file_path} to components {components}")
-        except Exception as e:
-            logger.error(f"Error uploading file: {e}")
-            return {
-                "error": True,
-                "message": f"Failed to upload file: {str(e)}",
-                "status_code": 500
-            }
-
-    # Construct API URL
+    
+    # Construct the API URL
     api_url = f"{BASE_API_URL}/lf/{LANGFLOW_ID}/api/v1/run/{endpoint}"
     
-    # Log configuration for debugging
+    # Debug configuration
     logger.info(f"DataStax Langflow Configuration:")
     logger.info(f"  API URL: {BASE_API_URL}")
     logger.info(f"  Langflow ID: {LANGFLOW_ID}")
@@ -290,6 +362,8 @@ async def run_langflow(
     logger.info(f"  Full API URL: {api_url}")
     logger.info(f"  Token provided: {'Yes' if application_token else 'No'}")
     logger.info(f"  Token length: {len(application_token) if application_token else 0}")
+    logger.info(f"  Input type: {input_type}")
+    logger.info(f"  Output type: {output_type}")
 
     # Prepare payload
     payload = {
@@ -313,7 +387,7 @@ async def run_langflow(
     try:
         # Make the API request
         logger.info(f"Calling DataStax Langflow API at {api_url}")
-        response = requests.post(api_url, json=payload, headers=headers)
+        response = requests.post(api_url, json=payload, headers=headers, timeout=30)
         
         # Check for authentication errors
         if response.status_code == 401 and retry_on_auth_error:
@@ -340,36 +414,61 @@ async def run_langflow(
                     retry_on_auth_error=False  # Prevent infinite retry loop
                 )
         
-        # Check for HTTP errors
-        if response.status_code != 200:
-            error_msg = f"DataStax Langflow API returned status code {response.status_code}"
+        # Check for validation errors
+        if response.status_code == 422:
             try:
                 error_data = response.json()
-                if isinstance(error_data, dict):
-                    if "detail" in error_data:
-                        error_msg = f"{error_msg}: {error_data['detail']}"
-                    logger.error(f"Error response data: {error_data}")
+                logger.error(f"Error response data: {error_data}")
+                
+                # Check if the error is related to input_type or output_type
+                if "input_type" in str(error_data) or "output_type" in str(error_data):
+                    logger.warning("Validation error with input_type or output_type. Retrying with default values.")
+                    return await run_langflow(
+                        message=message,
+                        endpoint=endpoint,
+                        output_type="text",  # Use default
+                        input_type="text",   # Use default
+                        tweaks=tweaks,
+                        application_token=application_token,
+                        file_path=file_path,
+                        components=components,
+                        retry_on_auth_error=retry_on_auth_error
+                    )
             except Exception as e:
-                error_msg = f"{error_msg}: {response.text[:200]}"
-                logger.error(f"Failed to parse error response: {e}")
-            
-            logger.error(error_msg)
+                logger.error(f"Error parsing validation error response: {e}")
+        
+        # Process the response
+        try:
+            if response.status_code == 200:
+                return response.json()
+            else:
+                # Try to parse error response
+                try:
+                    error_data = response.json()
+                    error_message = f"DataStax Langflow API returned status code {response.status_code}: {error_data}"
+                except Exception:
+                    # If we can't parse JSON, use the text response
+                    error_message = f"DataStax Langflow API returned status code {response.status_code}: {response.text[:200]}"
+                
+                logger.error(error_message)
+                return {
+                    "error": True,
+                    "message": error_message,
+                    "status_code": response.status_code
+                }
+        except Exception as e:
+            logger.error(f"Error processing API response: {e}")
             return {
                 "error": True,
-                "message": error_msg,
-                "status_code": response.status_code
+                "message": f"Error processing API response: {str(e)}",
+                "status_code": response.status_code if 'response' in locals() else 500
             }
-        
-        # Return the JSON response
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Error calling DataStax Langflow API: {e}"
-        logger.error(error_msg)
-        # Return error response
+    except Exception as e:
+        logger.error(f"Error calling DataStax Langflow API: {e}")
         return {
             "error": True,
-            "message": error_msg,
-            "status_code": getattr(e.response, "status_code", 500) if hasattr(e, "response") else 500
+            "message": f"Error calling DataStax Langflow API: {str(e)}",
+            "status_code": 500
         }
 
 
@@ -438,8 +537,8 @@ async def get_ai_food_recommendations(
         response = await run_langflow(
             message=message_str,
             application_token=application_token,
-            output_type="json",
-            input_type="json"
+            output_type="text",  # Use text output type
+            input_type="text"    # Use text input type
         )
         
         # Check for errors
@@ -467,7 +566,7 @@ async def get_ai_food_recommendations(
             }
         except Exception as e:
             logger.error(f"Error processing AI recommendations: {e}")
-            logger.error(f"Raw response: {response}")
+            logger.info(f"Raw response from langflow service: {json.dumps(response)[:500]}...")
             return {
                 "success": False,
                 "query": query,
@@ -504,125 +603,137 @@ def process_ai_recommendations(response: Dict[str, Any], limit: int = 5) -> List
     if isinstance(response, dict):
         logger.info(f"Response keys: {list(response.keys())}")
     
-    # Extract recommendations from the response
-    # Handle the specific structure from DataStax Langflow
-    if isinstance(response, dict):
-        # Check for the outputs structure from DataStax Langflow
-        if "outputs" in response:
-            outputs = response.get("outputs", [])
-            if outputs and isinstance(outputs, list):
-                for output in outputs:
-                    # Navigate through the nested structure
-                    if "outputs" in output and isinstance(output["outputs"], list):
-                        for inner_output in output["outputs"]:
-                            if "results" in inner_output and isinstance(inner_output["results"], dict):
-                                results = inner_output["results"]
-                                
-                                # Check for message structure
-                                if "message" in results and isinstance(results["message"], dict):
-                                    message = results["message"]
+    try:
+        # Extract recommendations from the response
+        # Handle the specific structure from DataStax Langflow
+        if isinstance(response, dict):
+            # Check for the outputs structure from DataStax Langflow
+            if "outputs" in response:
+                outputs = response.get("outputs", [])
+                if outputs and isinstance(outputs, list):
+                    for output in outputs:
+                        # Navigate through the nested structure
+                        if "outputs" in output and isinstance(output["outputs"], list):
+                            for inner_output in output["outputs"]:
+                                if "results" in inner_output and isinstance(inner_output["results"], dict):
+                                    results = inner_output["results"]
                                     
-                                    # Extract text content
-                                    if "data" in message and isinstance(message["data"], dict):
-                                        data = message["data"]
-                                        if "text" in data:
-                                            text_content = data["text"]
+                                    # Check for message structure
+                                    if "message" in results and isinstance(results["message"], dict):
+                                        message = results["message"]
+                                        
+                                        # Extract text content
+                                        if "data" in message and isinstance(message["data"], dict):
+                                            data = message["data"]
                                             
-                                            # Try to parse recommendations from text
-                                            try:
-                                                # First, try to parse as JSON
+                                            # Check for text content
+                                            text_key = message.get("text_key", "text")
+                                            text_content = data.get(text_key, "")
+                                            
+                                            if text_content:
+                                                # Try to parse as JSON first
                                                 try:
-                                                    parsed_json = json.loads(text_content)
-                                                    if isinstance(parsed_json, list):
-                                                        recommendations = parsed_json[:limit]
-                                                    elif isinstance(parsed_json, dict) and "recommendations" in parsed_json:
-                                                        recommendations = parsed_json.get("recommendations", [])[:limit]
+                                                    json_data = json.loads(text_content)
+                                                    if isinstance(json_data, list):
+                                                        # If it's a list, assume it's a list of recommendations
+                                                        recommendations = json_data
+                                                    elif isinstance(json_data, dict):
+                                                        # If it's a dict, check if it has a recommendations key
+                                                        if "recommendations" in json_data:
+                                                            recommendations = json_data["recommendations"]
+                                                        else:
+                                                            # Treat the dict as a single recommendation
+                                                            recommendations = [json_data]
                                                 except json.JSONDecodeError:
-                                                    # If not JSON, try to parse as text
-                                                    # Look for numbered or bulleted lists
-                                                    lines = text_content.split("\n")
-                                                    current_rec = None
-                                                    for line in lines:
-                                                        line = line.strip()
-                                                        # Check for numbered items or bullet points
-                                                        if (line.startswith("1.") or line.startswith("•") or 
-                                                            line.startswith("-") or line.startswith("*")):
-                                                            # Start a new recommendation
-                                                            if current_rec:
-                                                                recommendations.append(current_rec)
-                                                            
-                                                            # Extract the name from the line
-                                                            name = line.split(".", 1)[-1].strip() if "." in line else line[1:].strip()
-                                                            current_rec = {
-                                                                "name": name,
-                                                                "description": "",
-                                                                "ingredients": None,
-                                                                "preparation": None,
-                                                                "nutritional_info": None,
-                                                                "cuisine_type": None,
-                                                                "dietary_tags": None,
-                                                                "confidence_score": None
-                                                            }
-                                                        elif current_rec and line:
-                                                            # Add to the description of the current recommendation
-                                                            if current_rec["description"]:
-                                                                current_rec["description"] += " " + line
-                                                            else:
-                                                                current_rec["description"] = line
-                                                    
-                                                    # Add the last recommendation if it exists
-                                                    if current_rec:
-                                                        recommendations.append(current_rec)
-                                            except Exception as e:
-                                                logger.error(f"Error parsing recommendations from text: {e}")
-                                                # Fallback: treat the entire text as a single recommendation
-                                                recommendations = [{
-                                                    "name": "AI Food Recommendation",
-                                                    "description": text_content,
-                                                    "ingredients": None,
-                                                    "preparation": None,
-                                                    "nutritional_info": None,
-                                                    "cuisine_type": None,
-                                                    "dietary_tags": None,
-                                                    "confidence_score": None
-                                                }]
-        
-        # If we still don't have recommendations, try the original approach
-        if not recommendations:
-            # Try the original approach with result key
-            result = response.get("result", {})
+                                                    # If it's not valid JSON, try to parse as text
+                                                    try:
+                                                        # Split by numbered items (1., 2., etc.)
+                                                        import re
+                                                        rec_texts = re.split(r'\n\d+\.|\n\n', text_content)
+                                                        
+                                                        # Process each recommendation text
+                                                        for i, rec_text in enumerate(rec_texts):
+                                                            if not rec_text.strip():
+                                                                continue
+                                                                
+                                                            # Extract name and description
+                                                            lines = rec_text.strip().split('\n')
+                                                            if lines:
+                                                                name = lines[0].strip()
+                                                                description = ' '.join(lines[1:]) if len(lines) > 1 else ""
+                                                                
+                                                                recommendations.append({
+                                                                    "name": name,
+                                                                    "description": description,
+                                                                    "ingredients": None,
+                                                                    "preparation": None,
+                                                                    "nutritional_info": None,
+                                                                    "cuisine_type": None,
+                                                                    "dietary_tags": None,
+                                                                    "confidence_score": None
+                                                                })
+                                                    except Exception as e:
+                                                        logger.warning(f"Error parsing text as recommendations: {e}")
+                                                        # Fallback: treat the entire text as a single recommendation
+                                                        recommendations = [{
+                                                            "name": "AI Food Recommendation",
+                                                            "description": text_content,
+                                                            "ingredients": None,
+                                                            "preparation": None,
+                                                            "nutritional_info": None,
+                                                            "cuisine_type": None,
+                                                            "dietary_tags": None,
+                                                            "confidence_score": None
+                                                        }]
             
-            if isinstance(result, str):
-                # If result is a string, try to parse it as JSON
-                try:
-                    parsed_result = json.loads(result)
-                    if isinstance(parsed_result, list):
-                        # If it's a list of recommendations
-                        recommendations = parsed_result[:limit]
-                    elif isinstance(parsed_result, dict) and "recommendations" in parsed_result:
-                        # If it's a dict with a recommendations key
-                        recommendations = parsed_result.get("recommendations", [])[:limit]
-                except json.JSONDecodeError:
-                    # If it's not valid JSON, it might be a text response
-                    # Try to parse it as a text-based list of recommendations
-                    recommendations = [{"name": item.strip(), "description": ""} 
-                                      for item in result.split("\n") 
-                                      if item.strip()][:limit]
-            elif isinstance(result, list):
-                # If result is already a list
-                recommendations = result[:limit]
-            elif isinstance(result, dict) and "recommendations" in result:
-                # If result is a dict with recommendations
-                recommendations = result.get("recommendations", [])[:limit]
+            # If we still don't have recommendations, try other approaches
+            if not recommendations:
+                # Try the original approach with result key
+                result = response.get("result", "")
+                
+                if isinstance(result, str):
+                    # If result is a string, try to parse it as JSON
+                    try:
+                        json_data = json.loads(result)
+                        if isinstance(json_data, list):
+                            recommendations = json_data
+                        elif isinstance(json_data, dict) and "recommendations" in json_data:
+                            recommendations = json_data["recommendations"]
+                    except json.JSONDecodeError:
+                        # If it's not valid JSON, use it as a single recommendation
+                        recommendations = [{
+                            "name": "AI Food Recommendation",
+                            "description": result,
+                            "ingredients": None,
+                            "preparation": None,
+                            "nutritional_info": None,
+                            "cuisine_type": None,
+                            "dietary_tags": None,
+                            "confidence_score": None
+                        }]
+                elif isinstance(result, dict):
+                    # If result is a dict, check if it has recommendations
+                    if "recommendations" in result:
+                        recommendations = result["recommendations"]
+                    else:
+                        # Use the dict as a single recommendation
+                        recommendations = [result]
+                elif isinstance(result, list):
+                    # If result is already a list, use it directly
+                    recommendations = result
+    except Exception as e:
+        logger.error(f"Error processing AI response: {e}")
+        # Return empty list on error
+        return []
     
-    # Ensure each recommendation has the expected structure
+    # Ensure recommendations are properly structured
     structured_recommendations = []
-    for i, rec in enumerate(recommendations):
+    for i, rec in enumerate(recommendations[:limit]):
         if isinstance(rec, str):
-            # If the recommendation is just a string, create a simple structure
+            # If it's a string, use it as the name/description
             structured_recommendations.append({
-                "name": rec,
-                "description": None,
+                "name": f"Recommendation {i+1}",
+                "description": rec,
                 "ingredients": None,
                 "preparation": None,
                 "nutritional_info": None,
